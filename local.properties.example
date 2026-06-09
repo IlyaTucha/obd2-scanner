@@ -1,0 +1,10 @@
+# Скопируйте этот файл в local.properties и подставьте реальные значения.
+# local.properties в git не коммитится.
+
+# Путь к Android SDK
+sdk.dir=C:\\Users\\<username>\\AppData\\Local\\Android\\Sdk
+
+# Yandex MapKit Mobile SDK API key (нативный SDK; карта только на экране сводки поездки).
+# Прокидывается в код как BuildConfig.YANDEX_API_KEY.
+# Получить: https://developer.tech.yandex.ru/services/ (тип ключа: MapKit Mobile SDK).
+YANDEX_API_KEY=

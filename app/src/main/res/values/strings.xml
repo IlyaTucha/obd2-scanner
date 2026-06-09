@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OBD2 Monitor</string>
+
+    <!-- Common -->
+    <string name="connect">Подключить</string>
+    <string name="disconnect">Отключить</string>
+    <string name="connected">CONNECTED</string>
+    <string name="disconnected">DISCONNECTED</string>
+    <string name="connecting">Подключение…</string>
+    <string name="retry">Повторить</string>
+    <string name="cancel">Отмена</string>
+    <string name="save">Сохранить</string>
+    <string name="delete">Удалить</string>
+    <string name="share">Поделиться</string>
+
+    <!-- Bottom Nav -->
+    <string name="nav_dashboard">Дашборд</string>
+    <string name="nav_trip">Поездка</string>
+    <string name="nav_diagnostics">Диагностика</string>
+    <string name="nav_settings">Настройки</string>
+
+    <!-- Dashboard -->
+    <string name="speed">Скорость</string>
+    <string name="rpm">RPM</string>
+    <string name="engine_load">Нагрузка двигателя</string>
+    <string name="coolant_temp">Темп. ОЖ</string>
+    <string name="intake_temp">Темп. воздуха</string>
+    <string name="map_pressure">Давление впуска</string>
+    <string name="battery_voltage">Напряжение АКБ</string>
+    <string name="throttle">Положение дросселя</string>
+    <string name="fuel_consumption">Расход топлива</string>
+    <string name="fuel_level">Уровень топлива</string>
+    <string name="ignition_timing">Время зажигания</string>
+
+    <!-- Trip -->
+    <string name="trip_start">НАЧАТЬ ПОЕЗДКУ</string>
+    <string name="trip_stop">ЗАВЕРШИТЬ ПОЕЗДКУ</string>
+    <string name="trip_active">ПОЕЗДКА АКТИВНА</string>
+    <string name="trip_history">История поездок</string>
+    <string name="distance">Расстояние</string>
+    <string name="avg_speed">Средн. скор.</string>
+    <string name="max_speed">Макс. скор.</string>
+    <string name="fuel_used">Потрачено топлива</string>
+
+    <!-- Diagnostics -->
+    <string name="diagnostics_title">Диагностика</string>
+    <string name="scan_dtc">СКАНИРОВАТЬ ОШИБКИ</string>
+    <string name="clear_dtc">СБРОСИТЬ ОШИБКИ</string>
+    <string name="last_scan">Последняя проверка</string>
+
+    <!-- Service -->
+    <string name="trip_notification_title">Поездка активна</string>
+    <string name="trip_notification_channel">Запись поездки</string>
+    <string name="trip_notification_channel_desc">Уведомление активной записи поездки</string>
+
+    <!-- Stats -->
+    <string name="stat_now">СЕЙЧ</string>
+    <string name="stat_min">МИН</string>
+    <string name="stat_max">МАКС</string>
+    <string name="stat_avg">СР.</string>
+    <string name="reset_session">Сбросить статистику сессии</string>
+</resources>
