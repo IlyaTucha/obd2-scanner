@@ -77,7 +77,12 @@ class TripForegroundService : Service() {
      *  - игнорируем «прыжки» < MIN_MOVE_M от предыдущей точки.
      * Без этого LocationManager на низкой скорости пишет клубки точек по 5–15 м.
      */
+    /** Момент последнего колбэка от LocationManager — любого, даже отфильтрованного по
+     *  точности/движению. Это health-маркер подписки для gps-watchdog'а: пока колбэки
+     *  идут, подписка жива (даже когда стоим и точки не сохраняются). */
+    @Volatile private var lastFixAt = 0L
     private val locationListener = LocationListener { loc ->
+        lastFixAt = System.currentTimeMillis()
         val accuracyOk = !loc.hasAccuracy() || loc.accuracy <= MAX_ACCURACY_M
         if (!accuracyOk) return@LocationListener
         val prev = lastLocation
@@ -93,6 +98,11 @@ class TripForegroundService : Service() {
         private const val WRITE_INTERVAL_MS = 500L  // как часто пишем reading в Room
         private const val MIN_MOVE_M = 7f            // фильтр GPS-дрожания
         private const val MAX_ACCURACY_M = 25f       // отбрасываем «дикие» точки
+        /** Подписка на GPS есть, но колбэков нет дольше этого → пересоздаём подписку.
+         *  Лечит «пустую» первую подписку (холодный GPS-чип не шлёт фиксы / FGS стартовал
+         *  как dataSync до выдачи разрешения), из-за которой маршрут не писался до полного
+         *  перезапуска сессии. С запасом больше периода фиксов (2 c). */
+        private const val GPS_STALE_MS = 20_000L
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -125,19 +135,28 @@ class TripForegroundService : Service() {
             )
         }.onFailure { stopSelf(); return }
         fgsHasLocationType = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || hasLocationPerm
+        lastFixAt = System.currentTimeMillis()  // даём первой подписке окно GPS_STALE_MS до проверки
         startGps()
-        // GPS-ретрай. На ПЕРВОМ запуске сервис стартует параллельно с диалогом
-        // runtime-разрешений (MainActivity делает auto-connect, не дожидаясь ответа
-        // пользователя) — startGps() выше молча выходит без ACCESS_FINE_LOCATION, и
-        // без ретрая подписка не возникла бы до конца сессии: вся поездка писалась бы
-        // без координат («GPS-точек нет»), пока приложение не перезапустят. То же —
-        // если GPS-провайдер был выключен и его включили уже в дороге.
+        // GPS-watchdog на всю сессию. На ПЕРВОМ запуске сервис стартует параллельно с
+        // диалогом runtime-разрешений (MainActivity делает auto-connect, не дожидаясь
+        // ответа пользователя) — startGps() выше молча выходит без ACCESS_FINE_LOCATION.
+        // Прежний цикл выходил, как только requestLocationUpdates был ВЫЗВАН
+        // (gpsSubscribed=true) — но если первая подписка оказывалась «пустой» (холодный
+        // GPS-чип не шлёт колбэки, или FGS стартовал как dataSync до выдачи разрешения),
+        // маршрут оставался пустым до конца сессии: помогал только полный перезапуск
+        // сессии. Теперь цикл живёт всю сессию: поднимает тип FGS до location при
+        // появлении разрешения, подписывается если ещё не подписан, и ПЕРЕСОЗДАЁТ
+        // подписку, если колбэков нет дольше GPS_STALE_MS. Это авто-эквивалент
+        // «переподключиться с нуля», только для GPS.
         gpsRetryJob?.cancel()
         gpsRetryJob = scope.launch {
-            while (isActive && !(gpsSubscribed && fgsHasLocationType)) {
+            while (isActive) {
                 delay(5_000L)
                 if (!fgsHasLocationType && hasFineLocation()) upgradeToLocationFgs()
-                if (!gpsSubscribed) startGps()
+                when {
+                    !gpsSubscribed -> startGps()
+                    System.currentTimeMillis() - lastFixAt > GPS_STALE_MS -> restartGps()
+                }
             }
         }
         // НЕ вызываем controller.reset() — он сбросил бы paused=false и сломал бы
@@ -252,13 +271,26 @@ class TripForegroundService : Service() {
                 lm.requestLocationUpdates(
                     LocationManager.GPS_PROVIDER,
                     2000L,
-                    MIN_MOVE_M,
+                    // minDistance = 0: дельту по движению фильтруем в listener (MIN_MOVE_M).
+                    // Здесь 0, чтобы колбэки шли регулярно даже на стоянке — так gps-watchdog
+                    // отличает «подписка жива, но стоим» от «подписка мёртвая» (см. lastFixAt).
+                    0f,
                     locationListener,
                     Looper.getMainLooper(),
                 )
                 gpsSubscribed = true
+                lastFixAt = System.currentTimeMillis()
             }
         } catch (_: SecurityException) {}
+    }
+
+    /** Пересоздаёт GPS-подписку, НЕ теряя уже накопленный маршрут (lastLocation не
+     *  обнуляем — startGps повторно «затравит» его только если он null). Вызывает
+     *  gps-watchdog, когда подписка есть, но колбэки пропали. */
+    private fun restartGps() {
+        try { locationManager?.removeUpdates(locationListener) } catch (_: SecurityException) {}
+        gpsSubscribed = false
+        startGps()
     }
 
     private fun stopGps() {

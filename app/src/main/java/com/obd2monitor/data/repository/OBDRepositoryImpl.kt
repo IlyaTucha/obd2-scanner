@@ -121,10 +121,20 @@ class OBDRepositoryImpl @Inject constructor(
     override val liveData: SharedFlow<OBDData> get() = _liveData.asSharedFlow()
 
     override suspend fun connect(deviceAddress: String) {
+        // Идемпотентность: уже подключены к этому адресу и поллинг жив → ничего не
+        // трогаем. Повторный вызов не должен сносить рабочий pollJob и сокет ради
+        // холодного handshake заново. Activity на повороте/смене темы НЕ пересоздаётся
+        // (configChanges в манифесте), так что это подстраховка от повторного коннекта
+        // по уже живому соединению — повторный тап «Подключить» в настройках, редкое
+        // пересоздание Activity при живом процессе («Не сохранять действия»). Чинить
+        // живое, но залипшее соединение — задача watchdog'а в startPolling, не connect().
+        if (pollJob?.isActive == true &&
+            _status.value.state == ConnectionState.CONNECTED &&
+            _status.value.deviceAddress == deviceAddress
+        ) return
         // Отменяем фоновые задачи и поллинг перед новым подключением, чтобы повторный
-        // вызов connect() (MainActivity.attemptAutoConnect) не шёл поверх живого pollJob:
-        // два потока делили бы один сокет и ломали init. Старый/ghost-сокет закрывает
-        // establishConnection на первой попытке.
+        // вызов connect() не шёл поверх живого pollJob: два потока делили бы один сокет
+        // и ломали init. Старый/ghost-сокет закрывает establishConnection на первой попытке.
         recoveryJob?.cancel(); recoveryJob = null
         pollJob?.cancel(); pollJob = null
         _status.value = ConnectionStatus(state = ConnectionState.CONNECTING, deviceAddress = deviceAddress)
@@ -214,8 +224,12 @@ class OBDRepositoryImpl @Inject constructor(
         _status.value = prev.copy(state = ConnectionState.CONNECTING, errorMessage = null)
         val preferred = vehicleRepo.observeActive().firstOrNull()?.obdProtocol
         try {
-            // Та же процедура, что и при первом connect() — единый надёжный путь.
-            val init = establishConnection(addr, preferred)
+            // Та же процедура, что и при первом connect(), но с settleFirst: reconnect()
+            // вызывается всегда ПОСЛЕ проблемы (watchdog, кнопка «Переподключить»,
+            // авто-recovery после сбоя), когда адаптер заведомо «подвис». Поэтому даже
+            // первую попытку начинаем с полного отдыха сокета (close → пауза → clear) —
+            // ровно то, что делает ручное «Откл.»+пауза+«Подкл.», которое всегда срабатывает.
+            val init = establishConnection(addr, preferred, settleFirst = true)
             pids.set(init.supportedPids)
             _status.value = ConnectionStatus(
                 state = ConnectionState.CONNECTED,
@@ -251,16 +265,20 @@ class OBDRepositoryImpl @Inject constructor(
     private suspend fun establishConnection(
         addr: String,
         preferred: OBDProtocol?,
+        settleFirst: Boolean = false,
         attempts: Int = 3,
     ): ELM327Protocol.InitResult {
         var last: Throwable? = null
         repeat(attempts) { i ->
             try {
-                // Первую попытку начинаем с закрытия возможного старого/ghost-сокета
-                // (без паузы — «тёплый» коннект не замедляем). Ретраи идут через
-                // resetSocketState(): close + пауза 1200 мс на освобождение RFCOMM-канала
-                // + сброс PID-маски и кэшей — это и есть «отбросить сокет и переподключиться».
-                if (i == 0) ioMutex.withLock { runCatching { bt.close() } } else resetSocketState()
+                // Первую попытку при «холодном» connect() начинаем с лёгкого закрытия
+                // возможного старого/ghost-сокета (без паузы — тёплый адаптер не
+                // замедляем). При settleFirst (recovery/reconnect, адаптер заведомо
+                // подвис) и на всех ретраях идём через resetSocketState(): close +
+                // пауза 1200 мс на освобождение RFCOMM-канала + сброс PID-маски и
+                // кэшей — это и есть «отбросить сокет и переподключиться начисто».
+                if (i == 0 && !settleFirst) ioMutex.withLock { runCatching { bt.close() } }
+                else resetSocketState()
                 bt.connect(addr)
                 return handshakeOrThrow(preferred)
             } catch (t: Throwable) {
