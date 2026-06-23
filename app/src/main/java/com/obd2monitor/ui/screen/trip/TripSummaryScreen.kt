@@ -113,9 +113,9 @@ fun TripSummaryScreen(
         val tf = SimpleDateFormat("HH:mm", Locale.getDefault())
         val period = "${df.format(Date(trip.startTime))} — ${trip.endTime?.let { tf.format(Date(it)) } ?: "сейчас"}"
         // Подробная разбивка времени: «всего» = startTime → endTime, «на паузе» —
-        // накоплено TripController'ом, «в пути» = всего − пауза. Раньше в отчёт шло
-        // только trip.durationMs (всего), и это вводило в заблуждение если поездка
-        // долго стояла на паузе из-за разрывов OBD.
+        // накоплено TripController'ом, «в пути» = всего − пауза. Без разбивки один
+        // trip.durationMs (всего) вводил бы в заблуждение, если поездка долго стояла
+        // на паузе из-за разрывов OBD.
         val timeBreakdown = "Всего ${formatHms(trip.durationMs)} · в пути ${formatHms(trip.activeMs)} · на паузе ${formatHms(trip.pausedMs)}"
 
         Column(
@@ -212,10 +212,10 @@ fun TripSummaryScreen(
                             // через view.draw(canvas) попадает чёрной (тайлы рендерятся
                             // на отдельном surface, не на canvas-окна). Поэтому на время
                             // скриншота переключаемся на RoutePreview — Canvas-полилинию,
-                            // которая корректно сохраняется. Раньше тут было ровно
-                            // withFrameNanos { } (один кадр) — этого мало: AndroidView
-                            // ещё не успевал убраться, и на скриншот попадал чёрный
-                            // surface. 250 мс хватает чтобы:
+                            // которая корректно сохраняется. Одного кадра
+                            // (withFrameNanos { }) здесь мало: AndroidView не успевает
+                            // убраться, и на скриншот попадает чёрный surface.
+                            // 250 мс хватает чтобы:
                             //   1) Compose снёс AndroidView и положил RoutePreview;
                             //   2) Canvas нарисовал свой полилайн;
                             //   3) View дерево перерисовалось до начала захвата.

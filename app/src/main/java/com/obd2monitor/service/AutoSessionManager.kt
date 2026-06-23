@@ -87,8 +87,8 @@ class AutoSessionManager @Inject constructor(
                         // ставим на паузу и оставляем trip открытым: BT может оборваться
                         // потому что юзер вышел из машины / заглушил двигатель → когда
                         // вернётся и ELM снова подключится, запись продолжится в ту же
-                        // сессию. Раньше при любом разрыве trip немедленно закрывался,
-                        // и приходилось каждый раз вручную «продолжать».
+                        // сессию. Без этого любой разрыв закрывал бы trip, и продолжать
+                        // поездку приходилось бы вручную каждый раз.
                         (state == ConnectionState.DISCONNECTED || state == ConnectionState.ERROR) &&
                             currentTripId != null -> {
                             if (controller.consumeFinishRequest()) {

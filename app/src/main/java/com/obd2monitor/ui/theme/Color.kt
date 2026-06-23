@@ -33,6 +33,6 @@ val ColorGlassBorder = Color(0x55FFFFFF)
 
 // Фон модальных окон (AlertDialog/диалоги добавления записей).
 // Должен быть ОТЧЁТЛИВО темнее обычного surface, иначе диалог зрительно
-// сливается с экраном за ним. Раньше брался дефолтный M3 surfaceContainerHigh
-// (~#2B2D33) — почти как ColorNeutralSurface, диалог казался «прозрачным».
+// сливается с экраном за ним: дефолтный M3 surfaceContainerHigh (~#2B2D33)
+// почти как ColorNeutralSurface, и диалог выглядел бы «прозрачным».
 val ColorDialogScrim = Color(0xFF15161A)

@@ -129,8 +129,8 @@ class TripForegroundService : Service() {
         // GPS-ретрай. На ПЕРВОМ запуске сервис стартует параллельно с диалогом
         // runtime-разрешений (MainActivity делает auto-connect, не дожидаясь ответа
         // пользователя) — startGps() выше молча выходит без ACCESS_FINE_LOCATION, и
-        // раньше подписка не возникала до конца сессии: вся поездка писалась без
-        // координат («GPS-точек нет»), пока приложение не перезапустят. То же самое,
+        // без ретрая подписка не возникла бы до конца сессии: вся поездка писалась бы
+        // без координат («GPS-точек нет»), пока приложение не перезапустят. То же —
         // если GPS-провайдер был выключен и его включили уже в дороге.
         gpsRetryJob?.cancel()
         gpsRetryJob = scope.launch {
@@ -140,9 +140,9 @@ class TripForegroundService : Service() {
                 if (!gpsSubscribed) startGps()
             }
         }
-        // НЕ вызываем controller.reset() — он сбрасывал paused=false и ломал
+        // НЕ вызываем controller.reset() — он сбросил бы paused=false и сломал бы
         // усыновление осиротевшей сессии (onTripAdopted ставит паузу ДО старта
-        // сервиса, а reset() её тут же снимал). Состоянием паузы владеют
+        // сервиса, а reset() тут же её снял бы). Состоянием паузы владеют
         // AutoSessionManager и TripController.
 
         // Кэш последнего OBD-снимка (не блокируется отсутствием подключения)
@@ -152,8 +152,8 @@ class TripForegroundService : Service() {
         // Периодическая запись reading'ов.
         // Ждём появления активного trip'а (AutoSessionManager создаёт его параллельно со
         // стартом сервиса — на момент start() observeActiveTrip может ещё не успеть
-        // эмитнуть). firstOrNull раньше возвращал null и writer молча выходил → записи
-        // не велись пока сессия не пересоздастся.
+        // эмитнуть). С firstOrNull он вернул бы null и writer молча вышел бы → записи
+        // не велись бы пока сессия не пересоздастся; поэтому ждём filterNotNull().first().
         writerJob?.cancel()
         writerJob = scope.launch {
             val active = tripRepo.observeActiveTrip().filterNotNull().first()
@@ -238,11 +238,11 @@ class TripForegroundService : Service() {
         try {
             // Затравка lastLocation последней известной точкой (GPS, иначе NETWORK).
             // Без неё на первом подключении к ELM trip пишется ДО первого GPS-фикса
-            // с lat/lon=null, и карта в истории пустая. При повторном подключении GPS
-            // уже «тёплый» — фикс мгновенный, поэтому раньше баг проявлялся только
-            // на первой поездке. NETWORK_PROVIDER используем ТОЛЬКО для seed-точки —
-            // listener живёт по-прежнему на GPS_PROVIDER, чтобы стоянка не превращалась
-            // в «клубок» сетевых точек.
+            // с lat/lon=null, и карта в истории пустая (на повторном подключении GPS
+            // уже «тёплый», фикс мгновенный, поэтому затрагивается только первая
+            // поездка). NETWORK_PROVIDER используем ТОЛЬКО для seed-точки — listener
+            // живёт на GPS_PROVIDER, чтобы стоянка не превращалась в «клубок»
+            // сетевых точек.
             if (lastLocation == null) {
                 val seed = runCatching { lm.getLastKnownLocation(LocationManager.GPS_PROVIDER) }.getOrNull()
                     ?: runCatching { lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER) }.getOrNull()

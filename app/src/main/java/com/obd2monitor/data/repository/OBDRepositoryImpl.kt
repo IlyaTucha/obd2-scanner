@@ -11,6 +11,7 @@ import com.obd2monitor.domain.model.ConnectionStatus
 import com.obd2monitor.domain.model.DTCCode
 import com.obd2monitor.domain.model.EcuInfo
 import com.obd2monitor.domain.model.OBDData
+import com.obd2monitor.domain.model.OBDProtocol
 import com.obd2monitor.domain.repository.DTCRepository
 import com.obd2monitor.domain.repository.OBDRepository
 import com.obd2monitor.domain.repository.VehicleProfileRepository
@@ -31,6 +32,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -119,12 +121,19 @@ class OBDRepositoryImpl @Inject constructor(
     override val liveData: SharedFlow<OBDData> get() = _liveData.asSharedFlow()
 
     override suspend fun connect(deviceAddress: String) {
+        // Отменяем фоновые задачи и поллинг перед новым подключением, чтобы повторный
+        // вызов connect() (MainActivity.attemptAutoConnect) не шёл поверх живого pollJob:
+        // два потока делили бы один сокет и ломали init. Старый/ghost-сокет закрывает
+        // establishConnection на первой попытке.
+        recoveryJob?.cancel(); recoveryJob = null
+        pollJob?.cancel(); pollJob = null
         _status.value = ConnectionStatus(state = ConnectionState.CONNECTING, deviceAddress = deviceAddress)
+        val preferred = vehicleRepo.observeActive().firstOrNull()?.obdProtocol
         try {
-            bt.connect(deviceAddress)
-            _status.value = _status.value.copy(state = ConnectionState.INITIALIZING)
-            val activeProfile = vehicleRepo.observeActive().firstOrNull()
-            val init = elm.initialize(preferredProtocol = activeProfile?.obdProtocol)
+            // Единая процедура установки: несколько попыток, каждый ретрай — на свежем
+            // сокете (см. establishConnection). Это делает «холодный» первый коннект
+            // таким же надёжным, как реконнекты с паузы в течение дня.
+            val init = establishConnection(deviceAddress, preferred)
             pids.set(init.supportedPids)
             _status.value = ConnectionStatus(
                 state = ConnectionState.CONNECTED,
@@ -137,8 +146,9 @@ class OBDRepositoryImpl @Inject constructor(
             startPolling()
         } catch (t: Throwable) {
             // Сохраняем deviceAddress — чтобы кнопка «Переподключить» в UI осталась
-            // активной даже если первый handshake провалился (типично с ELM v1.5
-            // клонами: первая попытка ATZ ловит мусор, вторая проходит).
+            // активной даже при провале handshake. CONNECTED при пустой маске не
+            // объявляем (иначе откроется trip, встанет на «Паузу», карта пишется пустой).
+            // scheduleRecovery() продолжит повторы свежим сокетом в фоне.
             _status.value = ConnectionStatus(
                 state = ConnectionState.ERROR,
                 deviceAddress = deviceAddress,
@@ -164,7 +174,7 @@ class OBDRepositoryImpl @Inject constructor(
      * Закрывает дыры, до которых не дотягивается watchdog внутри pollJob:
      *  - первый connect() упал (типично: ELM ещё грузится после включения зажигания,
      *    auto-connect на старте приложения ловит таймаут) → pollJob так и не стартовал,
-     *    и раньше НИКТО больше не пробовал — сессия оставалась на паузе навсегда;
+     *    и без этого цикла восстанавливать связь больше некому — сессия висела бы на паузе;
      *  - ручной/watchdog reconnect() упал → pollJob уже отменён, восстанавливать некому.
      *
      * Пока pollJob жив — не вмешиваемся: его двухступенчатый stale-watchdog сам чинит
@@ -202,14 +212,10 @@ class OBDRepositoryImpl @Inject constructor(
         val prev = _status.value
         pollJob?.cancel(); pollJob = null
         _status.value = prev.copy(state = ConnectionState.CONNECTING, errorMessage = null)
-        ioMutex.withLock {
-            runCatching { bt.close() }
-        }
+        val preferred = vehicleRepo.observeActive().firstOrNull()?.obdProtocol
         try {
-            bt.connect(addr)
-            _status.value = _status.value.copy(state = ConnectionState.INITIALIZING)
-            val activeProfile = vehicleRepo.observeActive().firstOrNull()
-            val init = elm.initialize(preferredProtocol = activeProfile?.obdProtocol)
+            // Та же процедура, что и при первом connect() — единый надёжный путь.
+            val init = establishConnection(addr, preferred)
             pids.set(init.supportedPids)
             _status.value = ConnectionStatus(
                 state = ConnectionState.CONNECTED,
@@ -225,6 +231,74 @@ class OBDRepositoryImpl @Inject constructor(
             _status.value = _status.value.copy(state = ConnectionState.ERROR, errorMessage = t.message)
             try { bt.close() } catch (_: Throwable) {}
             scheduleRecovery()
+        }
+    }
+
+    /**
+     * Единая процедура установки связи для connect() и reconnect(): до [attempts]
+     * попыток, КАЖДЫЙ ретрай — на свежем сокете (close → пауза → open → ELM
+     * handshake). Принимаем только при непустой PID-маске (см. handshakeOrThrow).
+     *
+     * Зачем так. Дешёвый ELM-клон гарантированно «мусорит» на ПЕРВОМ сокете после
+     * подачи питания: первая команда теряет байты, echo не выключается, и 0100
+     * возвращает мусор → пустая маска. Реконнекты с паузы в течение дня потому и
+     * работают всегда, что идут на уже прогретый адаптер И пересоздают сокет. Здесь
+     * мы воспроизводим тот же сценарий с самого первого подключения: если первая
+     * попытка не дала маску — отбрасываем сокет и пробуем заново на свежем, пока не
+     * поднимется (или не исчерпаем попытки). «Тёплый» адаптер поднимается на первой
+     * же попытке без задержки; «холодный» — со второй (как при ручном переподключении).
+     */
+    private suspend fun establishConnection(
+        addr: String,
+        preferred: OBDProtocol?,
+        attempts: Int = 3,
+    ): ELM327Protocol.InitResult {
+        var last: Throwable? = null
+        repeat(attempts) { i ->
+            try {
+                // Первую попытку начинаем с закрытия возможного старого/ghost-сокета
+                // (без паузы — «тёплый» коннект не замедляем). Ретраи идут через
+                // resetSocketState(): close + пауза 1200 мс на освобождение RFCOMM-канала
+                // + сброс PID-маски и кэшей — это и есть «отбросить сокет и переподключиться».
+                if (i == 0) ioMutex.withLock { runCatching { bt.close() } } else resetSocketState()
+                bt.connect(addr)
+                return handshakeOrThrow(preferred)
+            } catch (t: Throwable) {
+                last = t
+            }
+        }
+        throw last ?: IOException("Не удалось установить связь с адаптером")
+    }
+
+    /**
+     * Прогоняет ELM-handshake и возвращает результат. БРОСАЕТ, если ECU не отдал ни
+     * одного поддерживаемого PID: пустая маска означает, что протокол не залочен (echo
+     * не выключился / шина не поднялась — типично для «холодного» клона), и объявлять
+     * CONNECTED в этом состоянии нельзя — поллинг будет вечно молчать, trip встанет на
+     * «Паузу», карта запишется пустой. Тот же инвариант соблюдает hard-reconnect ветка
+     * watchdog'а.
+     */
+    private suspend fun handshakeOrThrow(preferred: OBDProtocol?): ELM327Protocol.InitResult {
+        _status.value = _status.value.copy(state = ConnectionState.INITIALIZING)
+        val init = elm.initialize(preferredProtocol = preferred)
+        if (init.supportedPids.isEmpty()) {
+            throw IOException("Handshake не удался: ECU не вернул PID-маску")
+        }
+        return init
+    }
+
+    /**
+     * Полный сброс сокета и кэшей перед повторной попыткой handshake. Пауза 1200 мс —
+     * чтобы Android RFCOMM успел освободить канал (без неё новый connect() цепляется к
+     * мёртвому сокету). Эквивалент того, что делает ручное «Переподключить».
+     */
+    private suspend fun resetSocketState() {
+        ioMutex.withLock {
+            runCatching { bt.close() }
+            delay(1200L)
+            pids.clear()
+            synchronized(cacheLock) { lastSnapshot = OBDData() }
+            speedAccepted = null; speedPending = null
         }
     }
 
@@ -273,14 +347,11 @@ class OBDRepositoryImpl @Inject constructor(
                 // hot-tier PID'ы (speed/rpm/throttle/load/mapKpa) — они читаются в КАЖДОМ
                 // цикле и НЕ берутся из кэша, так что null означает «ECU молчит».
                 //
-                // Раньше тут было `snapshot.coolantTempC != null` — а coolant/intake/
-                // fuelLvl/battery/oil и т.д. подтягиваются из кэша (см. readSnapshot:
-                // `?: cached.X`), и после первой удачной slow-итерации они всегда
-                // не-null. Поэтому hasData оставался true даже при «ghost connection»:
-                // BT-стек ещё думал что мы подключены (машина рядом, питание ELM упало,
-                // вы отошли — RFCOMM не сразу падает), фактически от ECU ничего, а
-                // watchdog в AutoSessionManager продолжал считать связь живой и
-                // продолжал писать в trip нули. Теперь — только свежие hot-tier.
+                // Slow-tier PID (coolant/intake/fuelLvl/battery/oil …) для hasData не
+                // годятся: они подтягиваются из кэша (readSnapshot: `?: cached.X`) и после
+                // первой удачной slow-итерации всегда не-null, поэтому маскировали бы
+                // «ghost connection» (BT-сокет ещё рапортует подключение, а от ECU уже
+                // ничего). По hot-tier разрыв виден сразу.
                 val hasData = snapshot.speedKmh != null || snapshot.rpm != null ||
                     snapshot.throttlePercent != null || snapshot.engineLoadPercent != null ||
                     snapshot.mapKpa != null
@@ -314,18 +385,18 @@ class OBDRepositoryImpl @Inject constructor(
                     lastReinitAt = now
                     staleRecoveries++
                     // Эскалация. Light-путь (только ELM init, без пересоздания сокета)
-                    // пробуем лишь на ПЕРВОЙ попытке восстановления. Если после неё
-                    // данные так и не пошли — на всех следующих попытках принудительно
-                    // полностью пересоздаём RFCOMM-сокет, даже когда bt.isConnected ещё
-                    // рапортует true.
+                    // пробуем лишь на ПЕРВОЙ попытке восстановления. На следующих
+                    // попытках принудительно полностью пересоздаём RFCOMM-сокет, даже
+                    // когда bt.isConnected ещё рапортует true.
                     //
-                    // Это и есть лечение «при перезапуске машины пишет NO DATA и не
-                    // переподключается»: ELM327 питается от OBD-разъёма, при рестарте
-                    // двигателя адаптер уходит в ребут. Android RFCOMM при этом часто
-                    // ещё показывает socket.isConnected == true («ghost connection») —
-                    // и старый код вечно крутил light re-init, который молча падал в
-                    // IOException/NO DATA, так и не пересоздав сокет.
-                    val hardReconnect = !bt.isConnected || staleRecoveries > 1
+                    // Это лечит «ghost connection» после перезапуска двигателя: ELM327
+                    // питается от OBD-разъёма, при рестарте мотора уходит в ребут, а
+                    // Android RFCOMM часто ещё показывает socket.isConnected == true.
+                    // Light re-init на таком сокете молча падает в IOException/NO DATA,
+                    // не пересоздав его — поэтому нужен принудительный hard-путь.
+                    // Пустая PID-маска — явный признак что init не удался: не тратим
+                    // цикл на бесполезный light re-init, сразу пересоздаём сокет.
+                    val hardReconnect = !bt.isConnected || staleRecoveries > 1 || pids.all().isEmpty()
                     if (hardReconnect) {
                         // Полное переподключение сокета. Не вызываем `reconnect()` —
                         // он бы отменил текущий pollJob (то есть нас самих).
@@ -525,14 +596,12 @@ class OBDRepositoryImpl @Inject constructor(
         val warmupPct: Float? = coolant?.let { c ->
             ((c - 20f) / (coolantTargetC - 20f) * 100f).coerceIn(0f, 100f)
         }
-        // Cut-off: ECU отключил форсунки. Признак, который реально работает на NA-моторах
-        // без PID 5E (Accent его не отдаёт): engine load% почти ноль — двигатель не выдаёт
+        // Cut-off: ECU отключил форсунки. Признак, который работает на NA-моторах без
+        // PID 5E (Accent его не отдаёт): engine load% почти ноль — двигатель не выдаёт
         // мощность, его крутят колёса. Плюс мы ДВИЖЕМСЯ с приличной скоростью на передаче
-        // (rpm выше холостых) и педаль практически отпущена.
-        //
-        // Прежняя эвристика (throttle<2 + rpm>idle+100 + speed>5) ложно срабатывала на
-        // медленной езде с лёгким нажатием — формально все 3 пункта совпадают, но топливо
-        // подаётся. Добавляем engine load < 8% — на накате он 0..5%, на тяге всегда >15%.
+        // (rpm выше холостых) и педаль практически отпущена. Условие engine load < 8%
+        // ключевое: на накате он 0..5%, на тяге всегда >15% — оно отсекает медленную
+        // езду с лёгким нажатием газа (там throttle тоже мал, но топливо подаётся).
         val cutoff = (load != null && load < 8f) &&
             (rpm != null && rpm.toFloat() > idleTopRpm + 300f) &&
             (speed != null && speed > 15) &&
