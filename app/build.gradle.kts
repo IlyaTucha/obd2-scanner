@@ -1,3 +1,4 @@
+import java.io.FileInputStream
 import java.util.Properties
 
 plugins {
@@ -19,6 +20,21 @@ val yandexApiKey: String =
         ?: (project.findProperty("YANDEX_API_KEY") as? String)
         ?: ""
 
+// Версия из version.properties (коммитится). VERSION_CODE авто-инкрементится при release-сборке.
+val versionPropsFile = rootProject.file("version.properties")
+val versionProps = Properties().apply {
+    if (versionPropsFile.exists()) FileInputStream(versionPropsFile).use { load(it) }
+}
+val appVersionCode = (versionProps.getProperty("VERSION_CODE") ?: "1").trim().toInt()
+val appVersionName = (versionProps.getProperty("VERSION_NAME") ?: "1.0").trim()
+
+// Данные постоянной release-подписи из keystore.properties (НЕ коммитится).
+val keystorePropsFile = rootProject.file("keystore.properties")
+val keystoreProps = Properties().apply {
+    if (keystorePropsFile.exists()) FileInputStream(keystorePropsFile).use { load(it) }
+}
+val hasReleaseSigning = keystorePropsFile.exists()
+
 android {
     namespace = "com.obd2monitor"
     compileSdk = 34
@@ -27,8 +43,8 @@ android {
         applicationId = "com.obd2monitor"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
@@ -36,10 +52,24 @@ android {
         buildConfigField("String", "YANDEX_API_KEY", "\"$yandexApiKey\"")
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
         debug { isMinifyEnabled = false }
     }
@@ -105,3 +135,23 @@ dependencies {
 }
 
 kapt { correctErrorTypes = true }
+
+// Авто-инкремент VERSION_CODE при каждой release-сборке (versionCode должен строго расти).
+tasks.register("bumpVersionCode") {
+    doLast {
+        val props = Properties().apply {
+            if (versionPropsFile.exists()) FileInputStream(versionPropsFile).use { load(it) }
+        }
+        val current = (props.getProperty("VERSION_CODE") ?: "0").trim().toInt()
+        val next = current + 1
+        val lines = versionPropsFile.readLines().map { line ->
+            if (line.trimStart().startsWith("VERSION_CODE=")) "VERSION_CODE=$next" else line
+        }
+        versionPropsFile.writeText(lines.joinToString(System.lineSeparator()) + System.lineSeparator())
+        println("VERSION_CODE: $current -> $next")
+    }
+}
+
+tasks.matching { it.name.startsWith("package") && it.name.endsWith("Release") }.configureEach {
+    dependsOn("bumpVersionCode")
+}

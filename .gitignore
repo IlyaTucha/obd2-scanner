@@ -14,6 +14,9 @@ captures/
 *.aar
 *.jks
 *.keystore
+keystore.properties
+release.jks
+KEYSTORE_SECRET.txt
 google-services.json
 
 .backups/

@@ -5,13 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.location.Location
-import android.location.LocationListener
-import android.location.LocationManager
 import android.os.Build
 import android.os.IBinder
 import android.os.Looper
@@ -24,6 +21,12 @@ import com.obd2monitor.domain.model.OBDData
 import com.obd2monitor.domain.model.OBDReading
 import com.obd2monitor.domain.repository.OBDRepository
 import com.obd2monitor.domain.repository.TripRepository
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -45,7 +48,7 @@ import javax.inject.Inject
  *
  * Архитектура:
  *  - кэширует последний снимок OBD-данных (если есть подключение к ELM327)
- *  - кэширует последнюю GPS-локацию (LocationManager)
+ *  - кэширует последнюю GPS-локацию (FusedLocationProviderClient, Play Services)
  *  - раз в WRITE_INTERVAL_MS пишет OBDReading в Room с тем что есть
  *
  * Это значит: даже без OBD-подключения GPS-маршрут будет записываться.
@@ -62,7 +65,7 @@ class TripForegroundService : Service() {
     private var writerJob: Job? = null
     private var obdCacheJob: Job? = null
     private var gpsRetryJob: Job? = null
-    private var locationManager: LocationManager? = null
+    private var fusedClient: FusedLocationProviderClient? = null
     private val latestObd = MutableStateFlow(OBDData())
     private var lastLocation: Location? = null
     /** true — requestLocationUpdates успешно вызван (GPS-подписка живёт). */
@@ -81,13 +84,16 @@ class TripForegroundService : Service() {
      *  точности/движению. Это health-маркер подписки для gps-watchdog'а: пока колбэки
      *  идут, подписка жива (даже когда стоим и точки не сохраняются). */
     @Volatile private var lastFixAt = 0L
-    private val locationListener = LocationListener { loc ->
-        lastFixAt = System.currentTimeMillis()
-        val accuracyOk = !loc.hasAccuracy() || loc.accuracy <= MAX_ACCURACY_M
-        if (!accuracyOk) return@LocationListener
-        val prev = lastLocation
-        val moved = prev == null || prev.distanceTo(loc) >= MIN_MOVE_M
-        if (moved) lastLocation = loc
+    private val locationCallback = object : LocationCallback() {
+        override fun onLocationResult(result: LocationResult) {
+            val loc = result.lastLocation ?: return
+            lastFixAt = System.currentTimeMillis()
+            val accuracyOk = !loc.hasAccuracy() || loc.accuracy <= MAX_ACCURACY_M
+            if (!accuracyOk) return
+            val prev = lastLocation
+            val moved = prev == null || prev.distanceTo(loc) >= MIN_MOVE_M
+            if (moved) lastLocation = loc
+        }
     }
 
     companion object {
@@ -98,6 +104,7 @@ class TripForegroundService : Service() {
         private const val WRITE_INTERVAL_MS = 500L  // как часто пишем reading в Room
         private const val MIN_MOVE_M = 7f            // фильтр GPS-дрожания
         private const val MAX_ACCURACY_M = 25f       // отбрасываем «дикие» точки
+        private const val GPS_INTERVAL_MS = 2000L    // период запроса фиксов у fused-провайдера
         /** Подписка на GPS есть, но колбэков нет дольше этого → пересоздаём подписку.
          *  Лечит «пустую» первую подписку (холодный GPS-чип не шлёт фиксы / FGS стартовал
          *  как dataSync до выдачи разрешения), из-за которой маршрут не писался до полного
@@ -250,37 +257,31 @@ class TripForegroundService : Service() {
     }
 
     private fun startGps() {
-        val lm = locationManager
-            ?: (getSystemService(Context.LOCATION_SERVICE) as? LocationManager)?.also { locationManager = it }
-            ?: return
+        val client = fusedClient
+            ?: LocationServices.getFusedLocationProviderClient(this).also { fusedClient = it }
         if (!hasFineLocation()) return
         try {
-            // Затравка lastLocation последней известной точкой (GPS, иначе NETWORK).
-            // Без неё на первом подключении к ELM trip пишется ДО первого GPS-фикса
-            // с lat/lon=null, и карта в истории пустая (на повторном подключении GPS
-            // уже «тёплый», фикс мгновенный, поэтому затрагивается только первая
-            // поездка). NETWORK_PROVIDER используем ТОЛЬКО для seed-точки — listener
-            // живёт на GPS_PROVIDER, чтобы стоянка не превращалась в «клубок»
-            // сетевых точек.
+            // Затравка lastLocation последней известной точкой. Без неё на первом
+            // подключении к ELM trip пишется ДО первого фикса с lat/lon=null, и карта
+            // в истории пустая (на повторном подключении GPS уже «тёплый», фикс почти
+            // мгновенный, поэтому затрагивается только первая поездка). Fused сам
+            // выбирает лучший источник (GPS/сеть/сенсоры), так что отдельный fallback
+            // на NETWORK_PROVIDER больше не нужен.
             if (lastLocation == null) {
-                val seed = runCatching { lm.getLastKnownLocation(LocationManager.GPS_PROVIDER) }.getOrNull()
-                    ?: runCatching { lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER) }.getOrNull()
-                if (seed != null) lastLocation = seed
+                client.lastLocation.addOnSuccessListener { seed ->
+                    if (lastLocation == null && seed != null) lastLocation = seed
+                }
             }
-            if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                lm.requestLocationUpdates(
-                    LocationManager.GPS_PROVIDER,
-                    2000L,
-                    // minDistance = 0: дельту по движению фильтруем в listener (MIN_MOVE_M).
-                    // Здесь 0, чтобы колбэки шли регулярно даже на стоянке — так gps-watchdog
-                    // отличает «подписка жива, но стоим» от «подписка мёртвая» (см. lastFixAt).
-                    0f,
-                    locationListener,
-                    Looper.getMainLooper(),
-                )
-                gpsSubscribed = true
-                lastFixAt = System.currentTimeMillis()
-            }
+            val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, GPS_INTERVAL_MS)
+                .setMinUpdateIntervalMillis(GPS_INTERVAL_MS)
+                // minDistance = 0: дельту по движению фильтруем в callback (MIN_MOVE_M).
+                // Здесь 0, чтобы колбэки шли регулярно даже на стоянке — так gps-watchdog
+                // отличает «подписка жива, но стоим» от «подписка мёртвая» (см. lastFixAt).
+                .setMinUpdateDistanceMeters(0f)
+                .build()
+            client.requestLocationUpdates(request, locationCallback, Looper.getMainLooper())
+            gpsSubscribed = true
+            lastFixAt = System.currentTimeMillis()
         } catch (_: SecurityException) {}
     }
 
@@ -288,14 +289,14 @@ class TripForegroundService : Service() {
      *  обнуляем — startGps повторно «затравит» его только если он null). Вызывает
      *  gps-watchdog, когда подписка есть, но колбэки пропали. */
     private fun restartGps() {
-        try { locationManager?.removeUpdates(locationListener) } catch (_: SecurityException) {}
+        runCatching { fusedClient?.removeLocationUpdates(locationCallback) }
         gpsSubscribed = false
         startGps()
     }
 
     private fun stopGps() {
-        try { locationManager?.removeUpdates(locationListener) } catch (_: SecurityException) {}
-        locationManager = null
+        runCatching { fusedClient?.removeLocationUpdates(locationCallback) }
+        fusedClient = null
         lastLocation = null
         gpsSubscribed = false
     }
