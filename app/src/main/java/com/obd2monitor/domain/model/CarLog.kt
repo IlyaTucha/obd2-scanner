@@ -39,9 +39,27 @@ data class ExpenseEntry(
     /** Описание: «масло Mobil 5W30 4л + фильтр», «бампер», ... */
     val description: String,
     val amountRub: Float,
-    /** Пробег на момент расхода (опционально). Заполняется автоматически из последней MileageEntry. */
+    /** Пробег на момент расхода (опционально). По умолчанию — из журнала пробега на дату расхода. */
     val odometerKm: Int? = null,
-)
+    /** Литры заправки (для [ExpenseType.FUEL]). */
+    val fuelLiters: Float? = null,
+    /** Заправка до полного бака. */
+    val fullTank: Boolean = false,
+) {
+    /**
+     * Литры заправки: из поля, а у старых записей — из описания («40л 92», «35.9 л»),
+     * где их писали вручную до появления отдельного поля.
+     */
+    val liters: Float?
+        get() = if (type != ExpenseType.FUEL) null else fuelLiters ?: litersFromText(description)
+
+    companion object {
+        private val LITERS = Regex("""(\d+(?:[.,]\d+)?)\s*л(?![а-яё])""", RegexOption.IGNORE_CASE)
+
+        fun litersFromText(text: String): Float? =
+            LITERS.find(text)?.groupValues?.get(1)?.replace(',', '.')?.toFloatOrNull()?.takeIf { it in 1f..200f }
+    }
+}
 
 /**
  * Категории обслуживания с интервалами по умолчанию (км).

@@ -17,7 +17,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ExpenseEntryEntity::class,
         MaintenanceEntryEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -37,9 +37,18 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** v5 → v6: литры и отметка «полный бак» у заправок — для расчёта расхода
+         *  по чекам. Чистая ALTER-миграция, существующие записи не трогаются. */
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE expense_entries ADD COLUMN fuelLiters REAL")
+                database.execSQL("ALTER TABLE expense_entries ADD COLUMN fullTank INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun build(context: Context): AppDatabase = Room
             .databaseBuilder(context.applicationContext, AppDatabase::class.java, NAME)
-            .addMigrations(MIGRATION_4_5)
+            .addMigrations(MIGRATION_4_5, MIGRATION_5_6)
             // На случай если в будущем какой-то апгрейд приедет без миграции — НЕ хотим
             // молча терять историю. Лучше упасть с понятным исключением и заставить
             // меня написать миграцию (так же как было бы при destructiveMigration=off

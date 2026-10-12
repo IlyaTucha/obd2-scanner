@@ -2,11 +2,14 @@ package com.obd2monitor.domain.repository
 
 import com.obd2monitor.domain.model.OBDReading
 import com.obd2monitor.domain.model.Trip
+import com.obd2monitor.domain.model.TripFuelRow
 import kotlinx.coroutines.flow.Flow
 
 interface TripRepository {
     fun observeTrips(): Flow<List<Trip>>
     fun observeActiveTrip(): Flow<Trip?>
+    /** Итоги завершённых поездок профиля с расчётом топлива — для сравнения с чеками. */
+    fun observeFuelTotals(profileId: String): Flow<List<TripFuelRow>>
     /** Снимок активной поездки на момент вызова (без подписки). */
     suspend fun getActiveTripOnce(): Trip?
     /** Timestamp последней записанной точки данных по поездке. Используется при

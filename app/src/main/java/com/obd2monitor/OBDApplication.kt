@@ -37,7 +37,11 @@ class OBDApplication : Application() {
         // Ежедневный бэкап БД — страховка от неудачной миграции и ошибок при правке
         // схемы. Хранится в Android/data/<pkg>/files/db_backups, его можно забрать
         // файловым менеджером или по USB. Разрешений не требует.
-        appScope.launch { backupDatabase() }
+        appScope.launch {
+            backupDatabase()
+            // После бэкапа — чтобы удалённое осталось хотя бы в копии.
+            runCatching { db.tripDao().deleteOrphanReadings() }
+        }
     }
 
     /**

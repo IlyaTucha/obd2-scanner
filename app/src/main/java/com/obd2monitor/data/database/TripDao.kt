@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import com.obd2monitor.domain.model.TripFuelRow
 import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
@@ -15,6 +16,13 @@ interface TripDao {
     /** Снимок всех поездок без подписки — для экспорта в JSON. */
     @Query("SELECT * FROM trips ORDER BY startTime DESC")
     suspend fun getAllOnce(): List<TripEntity>
+
+    /** Итоги завершённых поездок с расчётом топлива (без маршрута и показаний). */
+    @Query(
+        "SELECT startTime, distanceKm, fuelUsedLiters FROM trips " +
+            "WHERE vehicleProfileId = :profileId AND endTime IS NOT NULL AND fuelUsedLiters > 0 AND distanceKm > 0"
+    )
+    fun observeFuelTotals(profileId: String): Flow<List<TripFuelRow>>
 
     @Query("SELECT * FROM trips WHERE endTime IS NULL ORDER BY startTime DESC LIMIT 1")
     fun observeActive(): Flow<TripEntity?>
@@ -44,11 +52,22 @@ interface TripDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertReading(reading: OBDReadingEntity)
 
+    /** Пакетная вставка — для импорта бэкапа сессий. */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertReadings(readings: List<OBDReadingEntity>)
+
     @Query("SELECT * FROM obd_readings WHERE tripId = :tripId ORDER BY timestamp ASC")
     suspend fun readingsFor(tripId: String): List<OBDReadingEntity>
 
     @Query("SELECT MAX(timestamp) FROM obd_readings WHERE tripId = :tripId")
     suspend fun lastReadingTimestamp(tripId: String): Long?
+
+    /**
+     * Показания без сессии (сессия удалена раньше, чем сервис дописал последние
+     * точки, — бывало в старых версиях). Нигде не видны и не экспортируются.
+     */
+    @Query("DELETE FROM obd_readings WHERE tripId NOT IN (SELECT id FROM trips)")
+    suspend fun deleteOrphanReadings(): Int
 
     @Query("DELETE FROM obd_readings WHERE tripId = :tripId")
     suspend fun deleteReadings(tripId: String)

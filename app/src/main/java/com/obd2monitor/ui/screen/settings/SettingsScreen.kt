@@ -87,21 +87,10 @@ fun SettingsScreen(
     // экран постоянно.
     var connectionExpanded by remember { mutableStateOf(false) }
     var profilesExpanded by remember { mutableStateOf(false) }
+    var fuelPriceExpanded by remember { mutableStateOf(false) }
 
     ScreenColumn {
         Text("Настройки", style = MaterialTheme.typography.headlineSmall)
-        // Авто-подключение в самом верху — самая частая настройка.
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("Подключаться автоматически", style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    "При запуске приложения — к последнему адаптеру",
-                    color = ColorTextSecondary,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            Switch(checked = state.autoConnect, onCheckedChange = viewModel::setAutoConnect)
-        }
 
         // Диагностика подключения вверху — самая частая проблема.
         ConnectionDiagnostics(status = conn)
@@ -112,6 +101,17 @@ fun SettingsScreen(
             expanded = connectionExpanded,
             onToggle = { connectionExpanded = !connectionExpanded },
         ) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 8.dp)) {
+                Column(Modifier.weight(1f)) {
+                    Text("Подключаться автоматически", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "При запуске приложения — к последнему адаптеру",
+                        color = ColorTextSecondary,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Switch(checked = state.autoConnect, onCheckedChange = viewModel::setAutoConnect)
+            }
             ConnectionBody(
                 isConnected = isConnected,
                 connectingAddress = conn.deviceAddress?.takeIf {
@@ -153,11 +153,15 @@ fun SettingsScreen(
             )
         }
 
-        SectionTitle("Цена топлива")
-        FuelPriceSection(
-            currentRub = activeProfile?.fuelPrice ?: 0f,
-            onSave = viewModel::setFuelPrice,
-        )
+        val fuelPrice = activeProfile?.fuelPrice ?: 0f
+        CollapsibleCard(
+            title = "Цена топлива",
+            subtitle = if (fuelPrice > 0f) "%.2f ₽/л".format(fuelPrice).replace(",00", "") else "Не указана",
+            expanded = fuelPriceExpanded,
+            onToggle = { fuelPriceExpanded = !fuelPriceExpanded },
+        ) {
+            FuelPriceSection(currentRub = fuelPrice, onSave = viewModel::setFuelPrice)
+        }
 
         // Секция «Авто» — VIN/гос.номер, пробег, обслуживание, расходы.
         // Живёт внизу настроек, а не отдельной вкладкой.
@@ -260,7 +264,8 @@ private fun BackupMenuHost(
 
 @Composable
 private fun SectionTitle(title: String) {
-    Text(title, style = MaterialTheme.typography.titleMedium, color = ColorNeutral)
+    // Тот же стиль и отступ, что у заголовков секций «Авто» (CarScreen.SectionHeader).
+    com.obd2monitor.ui.screen.car.SectionTitleText(title, Modifier.padding(horizontal = 4.dp))
 }
 
 @Composable
@@ -287,10 +292,13 @@ private fun CollapsibleCard(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(title, style = MaterialTheme.typography.titleMedium, color = ColorNeutral)
                     if (!subtitle.isNullOrBlank()) {
+                        // Одна строка: свёрнутые карточки одной высоты независимо от длины текста.
                         Text(
                             subtitle,
                             color = ColorTextSecondary,
                             style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                         )
                     }
                 }
@@ -498,63 +506,57 @@ private fun FuelPriceSection(currentRub: Float, onSave: (Float) -> Unit) {
     val isValid = parsed != null && parsed >= 0f
     val isDirty = parsed != null && kotlin.math.abs(parsed - currentRub) > 0.001f
 
-    Card(
-        colors = CardDefaults.cardColors(containerColor = ColorCard),
-        shape = RoundedCornerShape(16.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(
-                "Цена литра топлива для активного профиля. По ней считаются стоимость сессии и цена 100 км на «Главной».",
-                color = ColorTextSecondary,
-                style = MaterialTheme.typography.bodySmall,
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            "Цена литра топлива для активного профиля. По ней считаются стоимость сессии и цена 100 км на «Главной».",
+            color = ColorTextSecondary,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { newText ->
+                    // Только цифры и одна точка/запятая; не больше 6 символов (например "999.99").
+                    val filtered = newText.filter { it.isDigit() || it == '.' || it == ',' }
+                    text = filtered.take(7)
+                },
+                label = { Text("₽ за литр", color = ColorTextSecondary) },
+                singleLine = true,
+                isError = text.isNotEmpty() && !isValid,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                // Единая палитра muted-полей — та же что и во всех диалогах
+                // секции «Авто» (см. mutedTextFieldColors в CarScreen.kt).
+                // Чтобы поля выглядели одинаково «приглушённо» по всему
+                // приложению, без отдельного стиля у настроек.
+                colors = mutedTextFieldColors(),
+                modifier = Modifier.weight(1f),
             )
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = { newText ->
-                        // Только цифры и одна точка/запятая; не больше 6 символов (например "999.99").
-                        val filtered = newText.filter { it.isDigit() || it == '.' || it == ',' }
-                        text = filtered.take(7)
-                    },
-                    label = { Text("₽ за литр", color = ColorTextSecondary) },
-                    singleLine = true,
-                    isError = text.isNotEmpty() && !isValid,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    // Единая палитра muted-полей — та же что и во всех диалогах
-                    // секции «Авто» (см. mutedTextFieldColors в CarScreen.kt).
-                    // Чтобы поля выглядели одинаково «приглушённо» по всему
-                    // приложению, без отдельного стиля у настроек.
-                    colors = mutedTextFieldColors(),
-                    modifier = Modifier.weight(1f),
-                )
-                Button(
-                    onClick = { parsed?.let { onSave(it) } },
-                    enabled = isValid && isDirty,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = ColorPrimary,
-                        contentColor = com.obd2monitor.ui.theme.ColorOnPrimary,
-                        disabledContainerColor = ColorCard,
-                        disabledContentColor = ColorTextSecondary,
-                    ),
-                ) { Text("Сохранить") }
-            }
-            if (currentRub > 0f) {
-                Text(
-                    "Сохранено: %.2f ₽/л".format(currentRub),
-                    color = ColorTextSecondary,
-                    style = MaterialTheme.typography.labelSmall,
-                )
-            } else {
-                Text(
-                    "Цена не задана — карточки стоимости на «Главной» скрыты.",
-                    color = ColorTextSecondary,
-                    style = MaterialTheme.typography.labelSmall,
-                )
-            }
+            Button(
+                onClick = { parsed?.let { onSave(it) } },
+                enabled = isValid && isDirty,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = ColorPrimary,
+                    contentColor = com.obd2monitor.ui.theme.ColorOnPrimary,
+                    disabledContainerColor = ColorCard,
+                    disabledContentColor = ColorTextSecondary,
+                ),
+            ) { Text("Сохранить") }
+        }
+        if (currentRub > 0f) {
+            Text(
+                "Сохранено: %.2f ₽/л".format(currentRub),
+                color = ColorTextSecondary,
+                style = MaterialTheme.typography.labelSmall,
+            )
+        } else {
+            Text(
+                "Цена не задана — карточки стоимости на «Главной» скрыты.",
+                color = ColorTextSecondary,
+                style = MaterialTheme.typography.labelSmall,
+            )
         }
     }
 }

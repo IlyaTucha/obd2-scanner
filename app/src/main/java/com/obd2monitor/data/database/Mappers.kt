@@ -149,6 +149,8 @@ fun ExpenseEntryEntity.toDomain(): ExpenseEntry = ExpenseEntry(
     description = description,
     amountRub = amountRub,
     odometerKm = odometerKm,
+    fuelLiters = fuelLiters,
+    fullTank = fullTank,
 )
 
 fun ExpenseEntry.toEntity(): ExpenseEntryEntity = ExpenseEntryEntity(
@@ -159,6 +161,8 @@ fun ExpenseEntry.toEntity(): ExpenseEntryEntity = ExpenseEntryEntity(
     description = description,
     amountRub = amountRub,
     odometerKm = odometerKm,
+    fuelLiters = fuelLiters,
+    fullTank = fullTank,
 )
 
 fun MaintenanceEntryEntity.toDomain(): MaintenanceEntry = MaintenanceEntry(

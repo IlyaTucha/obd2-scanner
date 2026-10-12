@@ -58,8 +58,9 @@ fun shareCarReport(context: Context, uri: Uri?, fallbackText: String? = null) {
  * инвариант: export → import должен быть идемпотентен, никакого «вторичного»
  * мусора в БД не оседает.
  */
-private fun buildCarReportText(state: CarUiState): String {
-    val df = SimpleDateFormat("dd.MM.yyyy", Locale.getDefault())
+internal fun buildCarReportText(state: CarUiState): String {
+    // Дата со временем: иначе записи одного дня после импорта теряют порядок.
+    val df = SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.getDefault())
     val profile = state.profile
     return buildString {
         appendLine("ОТЧЁТ ПО АВТОМОБИЛЮ")
@@ -94,16 +95,18 @@ private fun buildCarReportText(state: CarUiState): String {
         appendLine("=== ОБСЛУЖИВАНИЕ ===")
         state.maintenance.sortedByDescending { it.date }.forEach { m ->
             val noteSuffix = if (m.note.isNotBlank()) ", ${m.note}" else ""
-            appendLine("  ${df.format(Date(m.date))}  ${m.type.russianName}: ${m.odometerKm} км$noteSuffix")
+            appendLine("  ${df.format(Date(m.date))}  ${m.type.russianName}: ${m.odometerKm} км · интервал ${m.intervalKm} км$noteSuffix")
         }
         appendLine()
 
         // ─── Расходы ─── только введённые записи, без «По категориям» и «Итого»
         appendLine("=== РАСХОДЫ ===")
         state.expenses.sortedByDescending { it.date }.forEach { e ->
-            val odo = e.odometerKm?.let { " · $it км" }.orEmpty()
+            val odo = e.odometerKm?.let { " · $it км" }.orEmpty() +
+                e.liters?.let { " · ${"%.2f".format(java.util.Locale.US, it)} л" }.orEmpty() +
+                if (e.fullTank) " · полный бак" else ""
             val desc = if (e.description.isNotBlank()) "\n      ${e.description}" else ""
-            appendLine("  ${df.format(Date(e.date))}  ${e.type.russianName}: ${"%.0f".format(e.amountRub)} ₽$odo$desc")
+            appendLine("  ${df.format(Date(e.date))}  ${e.type.russianName}: ${amountText(e.amountRub)} ₽$odo$desc")
         }
     }
 }
@@ -156,3 +159,7 @@ private fun exportFileName(profile: VehicleProfile?): String {
         ?: "car"
     return "obd2_car_${slug}_$stamp.txt"
 }
+
+/** Сумма без потери копеек: 2600 → «2600», 2068.96 → «2068.96». */
+private fun amountText(v: Float): String =
+    if (v == v.toInt().toFloat()) v.toInt().toString() else "%.2f".format(Locale.US, v)

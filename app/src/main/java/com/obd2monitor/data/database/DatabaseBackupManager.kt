@@ -2,6 +2,7 @@ package com.obd2monitor.data.database
 
 import android.content.Context
 import android.net.Uri
+import androidx.room.withTransaction
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -52,7 +53,14 @@ class DatabaseBackupManager @Inject constructor(
     // Используется в разделе «История сессий». Полный бэкап (со всеми таблицами:
     // профили, пробег, расходы, ТО) — это exportFullDbTo/stageFullDbImport ниже.
 
-    /** Экспорт только поездок и их readings в JSON. Возвращает количество поездок. */
+    /**
+     * Экспорт только поездок и их readings. Возвращает количество поездок.
+     *
+     * Формат v2 — построчный: первая строка — [TripBackupPayload] со списком поездок
+     * (без readings), дальше по одной строке на каждый reading. Показаний сотни тысяч:
+     * собрать их в одну JSON-строку (как в v1) — сотни мегабайт в памяти и падение.
+     * Здесь в памяти одновременно только показания одной поездки.
+     */
     suspend fun exportTripsTo(uri: Uri): Result<Int> = withContext(Dispatchers.IO) {
         runCatching {
             // WAL-чекпойнт — иначе только что закрытая поездка может не попасть в snapshot.
@@ -62,37 +70,54 @@ class DatabaseBackupManager @Inject constructor(
                     .use { it.moveToFirst() }
             }
             val trips = tripDao.getAllOnce()
-            val readings = trips.flatMap { tripDao.readingsFor(it.id) }
-            val payload = TripBackupPayload(
-                version = 1,
-                exportedAt = System.currentTimeMillis(),
-                trips = trips,
-                readings = readings,
-            )
-            val text = json.encodeToString(payload)
-            context.contentResolver.openOutputStream(uri, "w")?.use { out ->
-                out.write(text.toByteArray(Charsets.UTF_8))
+            val header = TripBackupPayload(version = 2, exportedAt = System.currentTimeMillis(), trips = trips)
+            context.contentResolver.openOutputStream(uri, "w")?.bufferedWriter(Charsets.UTF_8)?.use { out ->
+                out.write(json.encodeToString(header))
+                out.newLine()
+                trips.forEach { trip ->
+                    tripDao.readingsFor(trip.id).forEach { r ->
+                        out.write(json.encodeToString(r))
+                        out.newLine()
+                    }
+                }
             } ?: error("Не удалось открыть поток на запись")
             trips.size
         }
     }
 
-    /** Импорт поездок из JSON. Существующие поездки с тем же id заменяются
-     *  (OnConflictStrategy.REPLACE). Возвращает количество импортированных поездок. */
+    /**
+     * Импорт поездок. Поездка с тем же id заменяется целиком: её старые показания
+     * удаляются перед записью новых (связи между таблицами нет, и без этого
+     * повторный импорт задваивал бы показания). Понимает v1 (всё одной строкой)
+     * и v2 (построчно). Возвращает количество импортированных поездок.
+     */
     suspend fun importTripsFrom(uri: Uri): Result<Int> = withContext(Dispatchers.IO) {
         runCatching {
-            val text = context.contentResolver.openInputStream(uri)?.use {
-                it.readBytes().toString(Charsets.UTF_8)
-            } ?: error("Не удалось открыть поток на чтение")
-            val payload = runCatching { json.decodeFromString<TripBackupPayload>(text) }
-                .getOrElse { error("Файл не похож на JSON-бэкап поездок") }
-            check(payload.version == 1) { "Неподдерживаемая версия бэкапа: ${payload.version}" }
-            // Сначала trips (FK для readings), потом readings.
-            payload.trips.forEach { tripDao.insert(it) }
-            // Для readings обнуляем autogen-id, чтобы Room назначил новые и не было
-            // конфликтов с уже существующими записями в БД (PK у readings — Long autogen).
-            payload.readings.forEach { tripDao.insertReading(it.copy(id = 0L)) }
-            payload.trips.size
+            val input = context.contentResolver.openInputStream(uri) ?: error("Не удалось открыть поток на чтение")
+            input.bufferedReader(Charsets.UTF_8).use { reader ->
+                val first = reader.readLine() ?: error("Файл пустой")
+                val payload = runCatching { json.decodeFromString<TripBackupPayload>(first) }
+                    .getOrElse { error("Файл не похож на бэкап сессий") }
+                check(payload.version in 1..2) { "Неподдерживаемая версия бэкапа: ${payload.version}" }
+
+                db.withTransaction {
+                    payload.trips.forEach { trip ->
+                        tripDao.deleteReadings(trip.id)
+                        tripDao.insert(trip)
+                    }
+                }
+                // Для readings обнуляем autogen-id: Room назначит новые без конфликтов.
+                val readings = if (payload.version == 1) {
+                    payload.readings.asSequence()
+                } else {
+                    reader.lineSequence().filter { it.isNotBlank() }
+                        .map { json.decodeFromString<OBDReadingEntity>(it) }
+                }
+                readings.map { it.copy(id = 0L) }.chunked(IMPORT_BATCH).forEach { batch ->
+                    db.withTransaction { tripDao.insertReadings(batch) }
+                }
+                payload.trips.size
+            }
         }
     }
 
@@ -172,6 +197,8 @@ class DatabaseBackupManager @Inject constructor(
         // 16-байтовая magic-последовательность из спеки SQLite: "SQLite format 3\0".
         // Записана как byteArrayOf, чтобы не зависеть от того как кодировщик
         // запишет embedded NUL в .kt-файл.
+        /** Показаний на одну транзакцию при импорте. */
+        private const val IMPORT_BATCH = 1000
         private val SQLITE_MAGIC: ByteArray = byteArrayOf(
             0x53, 0x51, 0x4C, 0x69, 0x74, 0x65, 0x20, 0x66,
             0x6F, 0x72, 0x6D, 0x61, 0x74, 0x20, 0x33, 0x00,

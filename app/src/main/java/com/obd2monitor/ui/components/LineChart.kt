@@ -66,6 +66,8 @@ fun LineChart(
      * счётчик, передавая его как этот ключ).
      */
     resetSelectionKey: Any? = null,
+    /** Комментарии к точкам (длина == values.size): непустой показывается второй строкой подсказки. */
+    pointNotes: List<String>? = null,
 ) {
     val density = LocalDensity.current
     val labelPx = with(density) { 10.sp.toPx() }
@@ -334,6 +336,10 @@ fun LineChart(
             val xCaption = if (labels != null && labels.size == values.size)
                 labels.getOrNull(originalIdx) else null
             val text = if (xCaption != null) "${valueFormatter(v)} · $xCaption" else valueFormatter(v)
+            val notes = pointNotes
+            val note = if (notes != null && notes.size == values.size) {
+                notes.getOrNull(originalIdx)?.takeIf { it.isNotBlank() }
+            } else null
             // ВАЖНО: не использовать .apply { color = ... } здесь — Kotlin
             // резолвит `color` в outer-параметр LineChart (Color), а не в
             // Paint.color (Int). См. такой же приём строкой 119–121 для основного
@@ -344,9 +350,15 @@ fun LineChart(
             tooltipPaint.isAntiAlias = true
             val padX = 6.dp.toPx()
             val padY = 4.dp.toPx()
-            val textW = tooltipPaint.measureText(text)
+            val lineGap = 3.dp.toPx()
+            val notePaint = android.graphics.Paint(tooltipPaint)
+            notePaint.color = android.graphics.Color.argb(255, 184, 188, 200) // ColorNeutral
+            // Комментарий не шире области графика: длинный обрезаем с многоточием.
+            val maxTextW = (plotRight - plotLeft) - padX * 2
+            val noteText = note?.let { fitText(it, notePaint, maxTextW) }
+            val textW = maxOf(tooltipPaint.measureText(text), noteText?.let { notePaint.measureText(it) } ?: 0f)
             val boxW = textW + padX * 2
-            val boxH = tooltipTextPx + padY * 2
+            val boxH = tooltipTextPx + padY * 2 + if (noteText != null) tooltipTextPx + lineGap else 0f
             // Позиционируем подсказку ВЫШЕ точки. Если упирается в верх — снизу.
             // По X центрируем относительно точки, но не выпускаем за края plot.
             var boxLeft = (px - boxW / 2f).coerceIn(plotLeft, plotRight - boxW)
@@ -369,6 +381,14 @@ fun LineChart(
                 boxTop + padY + tooltipTextPx - 2f,
                 tooltipPaint,
             )
+            if (noteText != null) {
+                drawContext.canvas.nativeCanvas.drawText(
+                    noteText,
+                    boxLeft + padX,
+                    boxTop + padY + tooltipTextPx * 2 + lineGap - 2f,
+                    notePaint,
+                )
+            }
         }
 
         // Индикатор зума справа сверху.
@@ -391,3 +411,11 @@ private fun Color.toArgb(): Int = android.graphics.Color.argb(
     (green * 255).toInt().coerceIn(0, 255),
     (blue * 255).toInt().coerceIn(0, 255),
 )
+
+/** Обрезает [text] с многоточием, чтобы он поместился в [maxWidth] пикселей. */
+private fun fitText(text: String, paint: android.graphics.Paint, maxWidth: Float): String {
+    if (paint.measureText(text) <= maxWidth) return text
+    var end = text.length
+    while (end > 0 && paint.measureText(text, 0, end) + paint.measureText("…") > maxWidth) end--
+    return text.substring(0, end).trimEnd() + "…"
+}

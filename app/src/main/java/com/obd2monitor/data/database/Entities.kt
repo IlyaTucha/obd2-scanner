@@ -100,6 +100,10 @@ data class ExpenseEntryEntity(
     val description: String,
     val amountRub: Float,
     val odometerKm: Int? = null,
+    /** Литры заправки (только для топлива). null — не указаны. */
+    val fuelLiters: Float? = null,
+    /** Заправка до полного бака — точка отсчёта для точного расхода. */
+    val fullTank: Boolean = false,
 )
 
 @Entity(tableName = "maintenance_entries")

@@ -172,7 +172,7 @@ private fun buildCardGroups(state: DashboardUiState): List<Pair<String, List<Car
     } ?: ColorTextPrimary
 
     val engine = buildList {
-        add(CardSpec("coolant", Icons.Outlined.Thermostat, "Охлаждающая жидкость",
+        add(CardSpec("coolant", Icons.Outlined.Thermostat, "Антифриз",
             data.coolantTempC?.toString() ?: "—", "°C", coolantColor))
         add(CardSpec("battery", Icons.Outlined.BatteryFull, "Бортсеть", data.batteryVoltage?.let { "%.2f".format(it) } ?: "—", "В", batteryColor))
         add(CardSpec("load", Icons.Outlined.Memory, "Нагрузка", f0(data.engineLoadPercent), "%"))
@@ -217,9 +217,9 @@ private fun buildCardGroups(state: DashboardUiState): List<Pair<String, List<Car
 
     val diagnostics = buildList {
         if ((data.distanceMilKm ?: 0) > 0 || state.histories["distmil"]?.values?.any { it > 0f } == true) {
-            add(CardSpec("distmil", Icons.Outlined.Route, "Пробег с Check Engine", data.distanceMilKm?.toString() ?: "—", "км", ColorWarning))
+            add(CardSpec("distmil", Icons.Outlined.Route, "С Check Engine", data.distanceMilKm?.toString() ?: "—", "км", ColorWarning))
         }
-        if (has("distclear", data.distanceSinceClearKm)) add(CardSpec("distclear", Icons.Outlined.Route, "Пробег после сброса ошибок",
+        if (has("distclear", data.distanceSinceClearKm)) add(CardSpec("distclear", Icons.Outlined.Route, "После сброса ошибок",
             data.distanceSinceClearKm?.toString() ?: "—", "км"))
     }
 

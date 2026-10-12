@@ -64,6 +64,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -408,6 +410,9 @@ private fun LiveStatTile(stat: LiveStat, modifier: Modifier = Modifier) {
     }
 }
 
+/** Сколько сессий подгружается в истории за одно нажатие «Показать ещё». */
+private const val HISTORY_PAGE = 20
+
 /** История завершённых сессий. Открывается как отдельный route со вкладки «Сессия». */
 @Composable
 fun TripHistoryScreen(
@@ -416,6 +421,8 @@ fun TripHistoryScreen(
     viewModel: TripViewModel = hiltViewModel(),
 ) {
     val trips by viewModel.trips.collectAsStateWithLifecycle()
+    // Сессии подгружаются страницами — сотни карточек сразу не нужны.
+    var shown by rememberSaveable { mutableIntStateOf(HISTORY_PAGE) }
     var pendingDelete by remember { mutableStateOf<Trip?>(null) }
     var menuOpen by remember { mutableStateOf(false) }
     val context = LocalContext.current
@@ -509,12 +516,24 @@ fun TripHistoryScreen(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     contentPadding = PaddingValues(bottom = 24.dp),
                 ) {
-                    items(trips, key = { it.id }) { trip ->
+                    items(trips.take(shown), key = { it.id }) { trip ->
                         TripHistoryCard(
                             trip = trip,
                             onClick = { onOpenSummary(trip.id) },
                             onDelete = { pendingDelete = trip },
                         )
+                    }
+                    if (trips.size > shown) {
+                        item(key = "more") {
+                            val next = minOf(HISTORY_PAGE, trips.size - shown)
+                            TextButton(onClick = { shown += next }, modifier = Modifier.fillMaxWidth()) {
+                                Text(
+                                    if (next < trips.size - shown) "Показать ещё $next из ${trips.size - shown}"
+                                    else "Показать оставшиеся $next",
+                                    color = ColorTextSecondary,
+                                )
+                            }
+                        }
                     }
                 }
             }

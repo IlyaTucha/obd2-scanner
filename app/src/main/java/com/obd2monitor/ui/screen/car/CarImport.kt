@@ -37,6 +37,7 @@ data class CarImportResult(
 }
 
 private val dateFmt = SimpleDateFormat("dd.MM.yyyy", Locale.getDefault())
+private val dateTimeFmt = SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.getDefault())
 
 /** Читает Uri как текст и парсит. null если файла нет или содержимое пустое. */
 fun importCarReportFromUri(context: Context, uri: Uri): CarImportResult? {
@@ -94,7 +95,7 @@ private fun parseVehicleSection(body: String): Pair<String?, String?> {
 
 private fun parseMileageSection(body: String): List<MileageEntry> {
     // Строки формата «dd.MM.yyyy  87000 км» или «...  87000 км  — примечание».
-    val regex = Regex("""^(\d{2}\.\d{2}\.\d{4})\s+(\d+)\s*км\s*(?:[—–-]\s*(.*))?$""")
+    val regex = Regex("""^(\d{2}\.\d{2}\.\d{4}(?:\s+\d{2}:\d{2})?)\s+(\d+)\s*км\s*(?:[—–-]\s*(.*))?$""")
     val out = mutableListOf<MileageEntry>()
     body.lineSequence().forEach { raw ->
         val line = raw.trim()
@@ -116,7 +117,8 @@ private fun parseMaintenanceSection(body: String): List<MaintenanceEntry> {
     // Берём строки полной истории: «  dd.MM.yyyy  Моторное масло: 87000 км, заметка»
     // Заголовочные «• Тип [статус]» / «    Замена: ... → следующая ...» пропускаем,
     // т.к. они дублируют запись из полной истории.
-    val regex = Regex("""^(\d{2}\.\d{2}\.\d{4})\s+([^:]+?):\s*(\d+)\s*км(?:\s*,\s*(.*))?$""")
+    // Интервал пишется с версии, где его стали экспортировать; в старых файлах — нет.
+    val regex = Regex("""^(\d{2}\.\d{2}\.\d{4}(?:\s+\d{2}:\d{2})?)\s+([^:]+?):\s*(\d+)\s*км(?:\s*·\s*интервал\s*(\d+)\s*км)?(?:\s*,\s*(.*))?$""")
     val out = mutableListOf<MaintenanceEntry>()
     body.lineSequence().forEach { raw ->
         val line = raw.trim()
@@ -124,7 +126,8 @@ private fun parseMaintenanceSection(body: String): List<MaintenanceEntry> {
         val date = parseDate(m.groupValues[1]) ?: return@forEach
         val typeName = m.groupValues[2].trim()
         val odo = m.groupValues[3].toIntOrNull() ?: return@forEach
-        val note = m.groupValues.getOrNull(4).orEmpty().trim()
+        val interval = m.groupValues.getOrNull(4)?.toIntOrNull()
+        val note = m.groupValues.getOrNull(5).orEmpty().trim()
         val type = MaintenanceType.values().firstOrNull { it.russianName == typeName }
             ?: MaintenanceType.OTHER
         out += MaintenanceEntry(
@@ -132,7 +135,7 @@ private fun parseMaintenanceSection(body: String): List<MaintenanceEntry> {
             type = type,
             date = date,
             odometerKm = odo,
-            intervalKm = type.defaultIntervalKm,
+            intervalKm = interval ?: type.defaultIntervalKm,
             note = note,
         )
     }
@@ -140,9 +143,9 @@ private fun parseMaintenanceSection(body: String): List<MaintenanceEntry> {
 }
 
 private fun parseExpensesSection(body: String): List<ExpenseEntry> {
-    // Формат: «  dd.MM.yyyy  Тип: SUMM ₽ · ODO км» + опц. следующая строка с описанием
+    // Формат: «  dd.MM.yyyy  Тип: SUMM ₽ · ODO км · L л · полный бак» (хвост опционален) + опц. следующая строка с описанием
     // (шесть пробелов отступа в экспорте).
-    val regex = Regex("""^(\d{2}\.\d{2}\.\d{4})\s+([^:]+?):\s*([\d.,]+)\s*₽(?:\s*·\s*(\d+)\s*км)?\s*$""")
+    val regex = Regex("""^(\d{2}\.\d{2}\.\d{4}(?:\s+\d{2}:\d{2})?)\s+([^:]+?):\s*([\d.,]+)\s*₽(?:\s*·\s*(\d+)\s*км)?(?:\s*·\s*([\d.]+)\s*л)?(\s*·\s*полный бак)?\s*$""")
     val out = mutableListOf<ExpenseEntry>()
     val lines = body.lines()
     var i = 0
@@ -156,6 +159,8 @@ private fun parseExpensesSection(body: String): List<ExpenseEntry> {
         val amount = m.groupValues[3].replace(',', '.').replace(" ", "").toFloatOrNull()
         if (amount == null) { i++; continue }
         val odo = m.groupValues.getOrNull(4)?.toIntOrNull()
+        val liters = m.groupValues.getOrNull(5)?.toFloatOrNull()
+        val fullTank = m.groupValues.getOrNull(6).orEmpty().isNotBlank()
         val type = ExpenseType.values().firstOrNull { it.russianName == typeName } ?: ExpenseType.OTHER
 
         // Описание идёт следующей строкой с большим отступом (>=4 пробела) и без даты.
@@ -169,10 +174,16 @@ private fun parseExpensesSection(body: String): List<ExpenseEntry> {
             description = description,
             amountRub = amount,
             odometerKm = odo,
+            fuelLiters = liters,
+            fullTank = fullTank,
         )
         i += if (next != null) 2 else 1
     }
     return out
 }
 
-private fun parseDate(text: String): Long? = runCatching { dateFmt.parse(text)?.time }.getOrNull()
+/** «dd.MM.yyyy HH:mm» (новый формат) или «dd.MM.yyyy» (старые файлы). */
+private fun parseDate(text: String): Long? = runCatching {
+    val t = text.trim().replace(Regex("""\s+"""), " ")
+    (if (t.length > 10) dateTimeFmt else dateFmt).parse(t)?.time
+}.getOrNull()

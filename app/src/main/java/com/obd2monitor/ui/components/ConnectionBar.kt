@@ -62,13 +62,12 @@ fun ConnectionBar(
     val canReconnect = status.deviceAddress != null &&
         status.state != ConnectionState.CONNECTING &&
         status.state != ConnectionState.INITIALIZING
-    val details = when {
-        status.state == ConnectionState.CONNECTED ->
-            listOfNotNull(status.elmVersion?.takeIf { it.isNotBlank() } ?: "ELM327", status.protocol?.displayName)
-                .joinToString(" · ")
-        status.deviceAddress == null -> "Адаптер не подключён"
-        else -> "Адаптер ELM327"
-    }
+    // Подробности — только при подключении (версия адаптера и протокол); в остальных
+    // состояниях статус слева уже всё говорит, вторая подпись была бы повтором.
+    val details = if (status.state == ConnectionState.CONNECTED) {
+        listOfNotNull(status.elmVersion?.takeIf { it.isNotBlank() } ?: "ELM327", status.protocol?.displayName)
+            .joinToString(" · ")
+    } else null
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -88,13 +87,15 @@ fun ConnectionBar(
                 Box(Modifier.size(8.dp).clip(CircleShape).background(color))
                 Spacer(Modifier.width(6.dp))
                 Text(label, style = MaterialTheme.typography.labelMedium, color = color)
-                Text(
-                    "  ·  $details",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = ColorTextSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                if (details != null) {
+                    Text(
+                        "  ·  $details",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = ColorTextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {

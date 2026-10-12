@@ -31,6 +31,7 @@ import com.obd2monitor.ui.theme.ColorTextSecondary
 
 /**
  * Карточка параметра: иконка, название, значение и мини-график за последние минуты.
+ * Название в одну строку — иначе строки сетки получались разной высоты.
  */
 @Composable
 fun DataCard(
@@ -65,7 +66,7 @@ fun DataCard(
                 title,
                 style = MaterialTheme.typography.labelMedium,
                 color = ColorTextSecondary,
-                maxLines = 2,
+                maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }

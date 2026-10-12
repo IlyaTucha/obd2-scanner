@@ -7,12 +7,15 @@ import com.obd2monitor.data.vin.VinDecodeResult
 import com.obd2monitor.data.vin.VinDecoder
 import com.obd2monitor.domain.model.ExpenseEntry
 import com.obd2monitor.domain.model.ExpenseType
+import com.obd2monitor.domain.model.FuelEconomy
 import com.obd2monitor.domain.model.FuelType
 import com.obd2monitor.domain.model.MaintenanceEntry
 import com.obd2monitor.domain.model.MaintenanceType
 import com.obd2monitor.domain.model.MileageEntry
+import com.obd2monitor.domain.model.TripFuelRow
 import com.obd2monitor.domain.model.VehicleProfile
 import com.obd2monitor.domain.repository.CarLogRepository
+import com.obd2monitor.domain.repository.TripRepository
 import com.obd2monitor.domain.repository.VehicleProfileRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -52,6 +55,8 @@ data class CarUiState(
     val mileage: List<MileageEntry> = emptyList(),
     val expenses: List<ExpenseEntry> = emptyList(),
     val maintenance: List<MaintenanceEntry> = emptyList(),
+    /** Итоги поездок с расчётом топлива — для сравнения с расходом по чекам. */
+    val tripFuel: List<TripFuelRow> = emptyList(),
     val vinDecode: VinDecodeUiState = VinDecodeUiState.Idle,
 ) {
     /** Текущий одометр = последняя по дате запись пробега. 0 если записей нет. */
@@ -62,6 +67,35 @@ data class CarUiState(
         get() = expenses.groupBy { it.type }.mapValues { (_, list) -> list.sumOf { it.amountRub.toDouble() }.toFloat() }
 
     val totalExpenses: Float get() = expenses.sumOf { it.amountRub.toDouble() }.toFloat()
+
+    /** Расход топлива по заправкам (null — данных пока мало). */
+    val fuelEconomy: FuelEconomy? get() = FuelEconomy.compute(expenses, tripFuel, currentOdometerKm)
+
+    /**
+     * Пробег на дату [dateMs] по журналу пробега: запись за этот день, иначе
+     * линейная интерполяция между соседними записями, иначе ближайшая запись.
+     * null — журнал пуст.
+     */
+    fun odometerOn(dateMs: Long): Int? {
+        if (mileage.isEmpty()) return null
+        val day = dayKey(dateMs)
+        mileage.filter { dayKey(it.date) == day }.maxByOrNull { it.odometerKm }?.let { return it.odometerKm }
+        val before = mileage.filter { it.date < dateMs }.maxByOrNull { it.date }
+        val after = mileage.filter { it.date > dateMs }.minByOrNull { it.date }
+        return when {
+            before != null && after != null -> {
+                val t = (dateMs - before.date).toDouble() / (after.date - before.date)
+                (before.odometerKm + (after.odometerKm - before.odometerKm) * t).toInt()
+            }
+            before != null -> before.odometerKm
+            else -> after?.odometerKm
+        }
+    }
+
+    private fun dayKey(ms: Long): Long {
+        val c = java.util.Calendar.getInstance().apply { timeInMillis = ms }
+        return c.get(java.util.Calendar.YEAR) * 1000L + c.get(java.util.Calendar.DAY_OF_YEAR)
+    }
 
     val maintenanceStatus: List<MaintenanceStatus>
         get() {
@@ -79,6 +113,7 @@ data class CarUiState(
 class CarViewModel @Inject constructor(
     private val vehicleRepo: VehicleProfileRepository,
     private val carLogRepo: CarLogRepository,
+    private val tripRepo: TripRepository,
     private val vinDecoder: VinDecoder,
     /** Каталог авто (JSON в assets) — отдаём UI как property для каскадного picker. */
     val catalog: CarCatalog,
@@ -102,6 +137,11 @@ class CarViewModel @Inject constructor(
         if (p == null) flowOf(emptyList()) else carLogRepo.observeMaintenance(p.id)
     }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val tripFuelFlow = vehicleRepo.observeActive().flatMapLatest { p ->
+        if (p == null) flowOf(emptyList()) else tripRepo.observeFuelTotals(p.id)
+    }
+
     init {
         vehicleRepo.observeActive().onEach { profile ->
             _state.value = _state.value.copy(profile = profile)
@@ -109,6 +149,7 @@ class CarViewModel @Inject constructor(
         mileageFlow.onEach { _state.value = _state.value.copy(mileage = it) }.launchIn(viewModelScope)
         expensesFlow.onEach { _state.value = _state.value.copy(expenses = it) }.launchIn(viewModelScope)
         maintenanceFlow.onEach { _state.value = _state.value.copy(maintenance = it) }.launchIn(viewModelScope)
+        tripFuelFlow.onEach { _state.value = _state.value.copy(tripFuel = it) }.launchIn(viewModelScope)
     }
 
     /**
@@ -200,11 +241,20 @@ class CarViewModel @Inject constructor(
         viewModelScope.launch { carLogRepo.deleteMileage(id) }
     }
 
-    fun addExpense(dateMs: Long, type: ExpenseType, description: String, amountRub: Float) {
+    fun addExpense(
+        dateMs: Long,
+        type: ExpenseType,
+        description: String,
+        amountRub: Float,
+        odometerKm: Int?,
+        fuelLiters: Float?,
+        fullTank: Boolean,
+    ) {
         val profile = _state.value.profile ?: return
         if (amountRub <= 0f) return
         viewModelScope.launch {
-            val odo = carLogRepo.lastMileage(profile.id)?.odometerKm
+            // Пробег не указан — берём по журналу на дату расхода, а не последний.
+            val odo = odometerKm ?: _state.value.odometerOn(dateMs)
             carLogRepo.upsertExpense(
                 ExpenseEntry(
                     vehicleProfileId = profile.id,
@@ -213,6 +263,8 @@ class CarViewModel @Inject constructor(
                     description = description.trim(),
                     amountRub = amountRub,
                     odometerKm = odo,
+                    fuelLiters = fuelLiters.takeIf { type == ExpenseType.FUEL },
+                    fullTank = fullTank && type == ExpenseType.FUEL,
                 )
             )
         }

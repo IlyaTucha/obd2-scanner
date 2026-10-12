@@ -9,6 +9,7 @@ import com.obd2monitor.data.obd.ReadingMetrics
 import com.obd2monitor.data.obd.TripMath
 import com.obd2monitor.domain.model.OBDReading
 import com.obd2monitor.domain.model.Trip
+import com.obd2monitor.domain.model.TripFuelRow
 import com.obd2monitor.domain.repository.TripRepository
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -24,6 +25,8 @@ class TripRepositoryImpl @Inject constructor(
 ) : TripRepository {
 
     override fun observeTrips(): Flow<List<Trip>> = dao.observeAll().map { it.map { e -> e.toDomain() } }
+
+    override fun observeFuelTotals(profileId: String): Flow<List<TripFuelRow>> = dao.observeFuelTotals(profileId)
     override fun observeActiveTrip(): Flow<Trip?> = dao.observeActive().map { it?.toDomain() }
     override suspend fun getActiveTripOnce(): Trip? = dao.getActiveOnce()?.toDomain()
     override suspend fun lastReadingTimestamp(tripId: String): Long? = dao.lastReadingTimestamp(tripId)

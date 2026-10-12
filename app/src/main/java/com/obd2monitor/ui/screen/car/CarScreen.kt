@@ -54,6 +54,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
@@ -75,6 +76,7 @@ import com.obd2monitor.ui.theme.ColorWarning
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToInt
 
 private val dateFormat = SimpleDateFormat("dd.MM.yyyy", Locale.getDefault())
 
@@ -125,7 +127,7 @@ fun CarSection(viewModel: CarViewModel = hiltViewModel()) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Авто", style = MaterialTheme.typography.titleMedium, color = ColorNeutral, modifier = Modifier.weight(1f))
+            SectionTitleText("Авто", Modifier.weight(1f).padding(start = 4.dp))
             // Кнопка импорта: открывает системный пикер документов (.txt) и
             // загружает ранее экспортированный отчёт того же формата
             // (см. CarImport.parseCarReport). Применяет к активному профилю.
@@ -175,6 +177,9 @@ fun CarSection(viewModel: CarViewModel = hiltViewModel()) {
             onEdit = { showVehicleDialog = true },
         )
 
+        SectionHeader("Расход топлива", hint = "приблизительно")
+        FuelEconomyCard(economy = remember(state.expenses, state.tripFuel, state.mileage) { state.fuelEconomy })
+
         // Кликабелен ВЕСЬ заголовок (название + строка), не только иконка «+».
         // Карточки ниже сами не кликабельны — иначе тап по графику или чипу
         // открывал бы add-диалог (мешает разглядывать данные).
@@ -182,12 +187,6 @@ fun CarSection(viewModel: CarViewModel = hiltViewModel()) {
         MileageCard(
             entries = state.mileage,
             onEdit = { entry -> editingMileage = entry; showMileageDialog = true },
-        )
-
-        SectionHeader("Обслуживание", onAdd = { editingMaintenance = null; showMaintenanceDialog = true })
-        MaintenanceCard(
-            statuses = state.maintenanceStatus,
-            onEdit = { entry -> editingMaintenance = entry; showMaintenanceDialog = true },
         )
 
         SectionHeader("Расходы", onAdd = { editingExpense = null; showExpenseDialog = true })
@@ -202,6 +201,12 @@ fun CarSection(viewModel: CarViewModel = hiltViewModel()) {
         if (state.expenses.isNotEmpty()) {
             SpendingChartCard(expenses = state.expenses)
         }
+
+        SectionHeader("Обслуживание", onAdd = { editingMaintenance = null; showMaintenanceDialog = true })
+        MaintenanceCard(
+            statuses = state.maintenanceStatus,
+            onEdit = { entry -> editingMaintenance = entry; showMaintenanceDialog = true },
+        )
     }
 
     if (showVehicleDialog) {
@@ -245,13 +250,20 @@ fun CarSection(viewModel: CarViewModel = hiltViewModel()) {
     if (showExpenseDialog) {
         ExpenseAddDialog(
             editing = editingExpense,
+            odometerOn = state::odometerOn,
             onDismiss = { showExpenseDialog = false; editingExpense = null },
-            onSave = { date, type, desc, amt ->
+            onSave = { date, type, desc, amt, odo, liters, full ->
                 val orig = editingExpense
                 if (orig != null) {
-                    viewModel.upsertExpense(orig.copy(date = date, type = type, description = desc, amountRub = amt))
+                    val fuel = type == ExpenseType.FUEL
+                    viewModel.upsertExpense(
+                        orig.copy(
+                            date = date, type = type, description = desc, amountRub = amt, odometerKm = odo,
+                            fuelLiters = liters.takeIf { fuel }, fullTank = full && fuel,
+                        )
+                    )
                 } else {
-                    viewModel.addExpense(date, type, desc, amt)
+                    viewModel.addExpense(date, type, desc, amt, odo, liters, full)
                 }
                 showExpenseDialog = false
                 editingExpense = null
@@ -319,21 +331,39 @@ fun CarSection(viewModel: CarViewModel = hiltViewModel()) {
 }
 
 /**
- * Кликабельный заголовок секции — таппается ВЕСЬ ряд (включая текст), а не только
- * иконка «+». Так юзеру не нужно целиться в иконку.
+ * Заголовок секции — один стиль на всех секциях «Настроек» и «Авто».
+ * С [onAdd] кликабелен ВЕСЬ ряд (включая текст), а не только иконка «+».
+ * [hint] — бледная приписка рядом с названием.
  */
 @Composable
-private fun SectionHeader(title: String, onAdd: () -> Unit) {
+private fun SectionHeader(title: String, hint: String? = null, onAdd: (() -> Unit)? = null) {
     Row(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
-            .clickable(onClick = onAdd)
+            .then(if (onAdd != null) Modifier.clickable(onClick = onAdd) else Modifier)
             .padding(vertical = 6.dp, horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-        Icon(Icons.Filled.Add, contentDescription = "Добавить", tint = ColorNeutral, modifier = Modifier.size(22.dp))
+        SectionTitleText(title, Modifier.weight(1f), hint)
+        if (onAdd != null) {
+            Icon(Icons.Filled.Add, contentDescription = "Добавить", tint = ColorNeutral, modifier = Modifier.size(22.dp))
+        }
+    }
+}
+
+/** Текст заголовка секции: titleMedium, приглушённо-светлый; [hint] — бледнее. */
+@Composable
+internal fun SectionTitleText(title: String, modifier: Modifier = Modifier, hint: String? = null) {
+    Row(modifier, verticalAlignment = Alignment.Bottom) {
+        Text(title, style = MaterialTheme.typography.titleMedium, color = ColorNeutral)
+        if (hint != null) {
+            Text(
+                "  $hint",
+                style = MaterialTheme.typography.bodySmall,
+                color = ColorTextSecondary.copy(alpha = 0.7f),
+            )
+        }
     }
 }
 
@@ -352,11 +382,7 @@ private fun VehicleCard(
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text(
-            profile?.name ?: "Профиль не выбран",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
-        )
+        Text(profile?.name ?: "Профиль не выбран", style = MaterialTheme.typography.titleMedium)
         if (profile != null) {
             InfoLine("Марка / модель", "${profile.make} ${profile.model}")
             InfoLine("Год", profile.year.takeIf { it > 0 }?.toString() ?: "—")
@@ -381,10 +407,9 @@ private fun MileageCard(
     entries: List<MileageEntry>,
     onEdit: (MileageEntry) -> Unit,
 ) {
-    // Collapse-state на саму карточку: по умолчанию виден только график +
-    // последняя запись + ссылка «Показать все (N)». Раскрытие — полный список.
-    // Это резко уменьшает прокрутку, когда в журнале накопилось 50+ записей.
-    var expanded by remember { mutableStateOf(false) }
+    // По умолчанию виден только график и последняя запись; остальные
+    // подгружаются страницами по «Показать ещё» (в журнале сотни записей).
+    var shown by remember { mutableIntStateOf(1) }
     // Тап вне самого графика (по фону карточки / тексту итога / списку строк)
     // снимает выделение точки на LineChart. Внутренние pointerInput'ы графика
     // и EditableRow'ов перехватывают тапы на себя, поэтому outer-детектор
@@ -427,6 +452,7 @@ private fun MileageCard(
                     valueFormatter = { "%.0f".format(it) },
                     xAxisLabels = xLabels,
                     resetSelectionKey = chartResetTick,
+                    pointNotes = sorted.map { it.note },
                 )
             }
             val deltaKm = (sorted.last().odometerKm - sorted.first().odometerKm).coerceAtLeast(0)
@@ -439,8 +465,7 @@ private fun MileageCard(
             )
         }
         val sortedDesc = entries.sortedByDescending { it.date }
-        val visible = if (expanded) sortedDesc else sortedDesc.take(1)
-        visible.forEach { entry ->
+        sortedDesc.take(shown).forEach { entry ->
             // Каждая строка — кликабельная: тап открывает диалог редактирования
             // именно этой записи. Иконка удаления слева не нужна — удаление
             // доступно из диалога edit'а.
@@ -453,13 +478,7 @@ private fun MileageCard(
                 )
             }
         }
-        if (entries.size > 1) {
-            ExpandToggle(
-                expanded = expanded,
-                collapsedLabel = "Показать все (${entries.size})",
-                onToggle = { expanded = !expanded },
-            )
-        }
+        PagedControls(shown, entries.size, initial = 1, pageSize = LIST_PAGE, onShownChange = { shown = it })
         if (entries.isEmpty()) {
             Text(
                 "Нет записей. Тап по заголовку «Пробег» — чтобы добавить пробег на любую дату.",
@@ -492,15 +511,60 @@ private fun EditableRow(
     }
 }
 
-/** Маленький toggle-link: «Показать все (N)» ↔ «Свернуть». */
+/** Сколько записей журнала подгружается за одно нажатие «Показать ещё». */
+private const val LIST_PAGE = 20
+
+/**
+ * Постраничный показ длинного списка: «Показать ещё N» добавляет [pageSize] записей,
+ * «Свернуть» возвращает к [initial]. Сотни записей не рисуются разом.
+ */
+@Composable
+private fun PagedControls(
+    shown: Int,
+    total: Int,
+    initial: Int,
+    pageSize: Int,
+    onShownChange: (Int) -> Unit,
+) {
+    if (total <= initial) return
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        if (shown < total) {
+            val next = minOf(pageSize, total - shown)
+            Text(
+                if (next < total - shown) "Показать ещё $next из ${total - shown}" else "Показать оставшиеся $next",
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onShownChange(shown + next) }
+                    .padding(vertical = 6.dp, horizontal = 4.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = ColorNeutral,
+            )
+        }
+        Spacer(Modifier.weight(1f))
+        if (shown > initial) {
+            Text(
+                "Свернуть",
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onShownChange(initial) }
+                    .padding(vertical = 6.dp, horizontal = 4.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = ColorTextSecondary,
+            )
+        }
+    }
+}
+
+/** Маленький toggle-link: «Подробнее» ↔ «Свернуть». */
 @Composable
 private fun ExpandToggle(
     expanded: Boolean,
     collapsedLabel: String,
     onToggle: () -> Unit,
+    expandedLabel: String = "Свернуть",
 ) {
     Text(
-        if (expanded) "Свернуть" else collapsedLabel,
+        if (expanded) expandedLabel else collapsedLabel,
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
@@ -585,9 +649,9 @@ private fun ExpensesCard(
     state: CarUiState,
     onEdit: (com.obd2monitor.domain.model.ExpenseEntry) -> Unit,
 ) {
-    // По умолчанию виден только последний расход + сумма по категориям.
-    // По «Показать все» раскрывается полный список (десятки–сотни записей).
-    var expanded by remember { mutableStateOf(false) }
+    // По умолчанию виден только последний расход + сумма по категориям;
+    // остальные подгружаются страницами по «Показать ещё».
+    var shown by remember { mutableIntStateOf(1) }
     // Выбранная категория для drill-down модалки. null = модалка не показана;
     // при тапе на плашку «Топливо» / «Запчасти» / ... сюда кладётся тип, и
     // открывается отдельный AlertDialog со всеми записями этой категории.
@@ -600,25 +664,11 @@ private fun ExpensesCard(
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        // Заголовок карточки «Расходы»: «Итого:» (приглушённо) + сумма в одну
-        // строку — один Row. На двух строках (label сверху, value снизу) это
-        // воспринималось бы как «перенос». Сумма не переносится (softWrap=false),
-        // при нехватке ширины обрезается эллипсисом.
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "Итого: ",
-                style = MaterialTheme.typography.titleMedium,
-                color = ColorTextSecondary,
-            )
-            Text(
-                "${"%,.0f".format(state.totalExpenses).replace(',', ' ')} ₽",
-                style = MaterialTheme.typography.titleLarge,
-                maxLines = 1,
-                softWrap = false,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
-            )
-        }
+        CardValue(
+            "${"%,.0f".format(state.totalExpenses).replace(',', ' ')} ₽",
+            "за всё время",
+            inline = true,
+        )
         if (state.expensesByType.isNotEmpty()) {
             // Сетка 2 колонки одинаковой ширины. FlowRow паковал жадно слева направо
             // и оставлял пустые «дырки» справа когда длинный лейбл («Налог/штраф»)
@@ -645,8 +695,7 @@ private fun ExpensesCard(
             }
         }
         val sortedExpenses = state.expenses  // dao уже отдаёт DESC по дате
-        val visible = if (expanded) sortedExpenses else sortedExpenses.take(1)
-        visible.forEach { exp ->
+        sortedExpenses.take(shown).forEach { exp ->
             EditableRow(onClick = { onEdit(exp) }) {
                 Text(
                     "${exp.type.russianName} · ${"%,.0f".format(exp.amountRub).replace(',', ' ')} ₽",
@@ -661,13 +710,7 @@ private fun ExpensesCard(
                 )
             }
         }
-        if (sortedExpenses.size > 1) {
-            ExpandToggle(
-                expanded = expanded,
-                collapsedLabel = "Показать все (${sortedExpenses.size})",
-                onToggle = { expanded = !expanded },
-            )
-        }
+        PagedControls(shown, sortedExpenses.size, initial = 1, pageSize = LIST_PAGE, onShownChange = { shown = it })
         if (state.expenses.isEmpty()) {
             Text(
                 "Нет расходов. Тап по заголовку «Расходы» — чтобы добавить ТО, бензин, запчасти и т.д.",
@@ -693,6 +736,163 @@ private fun ExpensesCard(
         )
     }
 }
+
+/**
+ * Главное значение карточки — одинаково во всех карточках «Авто»: крупное
+ * значение и серая подпись под ним. [aside] — второе значение справа с подписью.
+ */
+@Composable
+private fun CardValue(
+    value: String,
+    caption: String,
+    aside: Pair<String, String>? = null,
+    /** Подпись в одну строку со значением, а не под ним. */
+    inline: Boolean = false,
+) {
+    if (inline) {
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(value, style = MaterialTheme.typography.titleLarge, maxLines = 1)
+            Text(
+                "  $caption",
+                style = MaterialTheme.typography.bodySmall,
+                color = ColorTextSecondary,
+                modifier = Modifier.padding(bottom = 3.dp),
+            )
+        }
+        return
+    }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                value,
+                style = MaterialTheme.typography.titleLarge,
+                maxLines = 1,
+                softWrap = false,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+            Text(caption, style = MaterialTheme.typography.bodySmall, color = ColorTextSecondary)
+        }
+        if (aside != null) {
+            Column(horizontalAlignment = Alignment.End) {
+                Text(aside.first, style = MaterialTheme.typography.titleMedium, color = ColorNeutral)
+                Text(aside.second, style = MaterialTheme.typography.bodySmall, color = ColorTextSecondary)
+            }
+        }
+    }
+}
+
+/**
+ * Расход топлива по заправкам: литры из журнала расходов против пробега.
+ * Справа — расчёт по датчикам OBD за тот же период, чтобы видеть, насколько
+ * ему можно доверять.
+ */
+@Composable
+private fun FuelEconomyCard(economy: com.obd2monitor.domain.model.FuelEconomy?) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(ColorCard)
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        if (economy == null) {
+            Text(
+                "Появится после нескольких заправок с литрами и пробегом.",
+                style = MaterialTheme.typography.bodySmall,
+                color = ColorTextSecondary,
+            )
+            return@Column
+        }
+        val obd = economy.overallObd?.let { o ->
+            val diff = ((o.lPer100 / economy.overall.lPer100 - 1f) * 100f).roundToInt()
+            val sign = when {
+                diff > 0 -> "+$diff%"
+                diff < 0 -> "−${-diff}%"
+                else -> "0%"
+            }
+            "${lPer100(o.lPer100)} ($sign)" to "по датчикам OBD"
+        }
+        CardValue(
+            "${lPer100(economy.overall.lPer100)} л/100 км",
+            "за всё время · ${"%.0f".format(economy.overall.liters)} л · ${economy.overall.km} км",
+            aside = obd,
+        )
+        Spacer(Modifier.height(4.dp))
+        economy.lastTank?.let { t ->
+            InfoLine("Последний полный бак, ${tankDates(t)}", "${lPer100(t.span.lPer100)} л/100 км")
+        }
+        economy.sinceLastFill?.let { s ->
+            InfoLine(
+                "С заправки ${shortDate.format(Date(s.date))}, ${s.km} км",
+                "~${"%.0f".format(s.estimatedLiters)} л",
+            )
+        }
+
+        var expanded by remember { mutableStateOf(false) }
+        var tanksShown by remember { mutableIntStateOf(TANKS_PAGE) }
+        if (expanded) {
+            if (economy.tanks.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Text("Полные баки", style = MaterialTheme.typography.labelLarge, color = ColorNeutral)
+                economy.tanks.asReversed().take(tanksShown).forEach { t ->
+                    InfoLine(
+                        "${tankDates(t)} · ${t.span.km} км · ${"%.0f".format(t.span.liters)} л",
+                        "${lPer100(t.span.lPer100)} л/100 км",
+                    )
+                }
+                PagedControls(tanksShown, economy.tanks.size, initial = TANKS_PAGE, pageSize = TANKS_PAGE) {
+                    tanksShown = it
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Text("Как считается", style = MaterialTheme.typography.labelLarge, color = ColorNeutral)
+            FuelNote(
+                "За всё время",
+                "все залитые литры, кроме последней заправки, на пробег от первой заправки до последней.",
+            )
+            FuelNote(
+                "Полный бак",
+                "литры, залитые до полного, на пробег от предыдущей заправки до полного. " +
+                    "Точность зависит от пробега, указанного у заправок.",
+            )
+            FuelNote(
+                "С заправки",
+                "пробег по журналу × средний расход за всё время. Сколько сгорело на самом деле, " +
+                    "станет известно на следующей заправке.",
+            )
+        }
+        ExpandToggle(
+            expanded = expanded,
+            collapsedLabel = "Подробнее",
+            expandedLabel = "Скрыть подробности",
+            onToggle = { expanded = !expanded },
+        )
+    }
+}
+
+private const val TANKS_PAGE = 10
+
+private fun tankDates(t: com.obd2monitor.domain.model.FuelTank): String =
+    "${shortDate.format(Date(t.fromDate))} – ${shortDate.format(Date(t.toDate))}"
+
+/** Пояснение к расчёту: название строки светлее, объяснение — серым. */
+@Composable
+private fun FuelNote(title: String, text: String) {
+    Text(
+        androidx.compose.ui.text.buildAnnotatedString {
+            withStyle(androidx.compose.ui.text.SpanStyle(color = ColorNeutral)) { append(title) }
+            append(" — ")
+            append(text)
+        },
+        style = MaterialTheme.typography.bodySmall,
+        color = ColorTextSecondary,
+    )
+}
+
+private val shortDate = SimpleDateFormat("dd.MM", Locale.getDefault())
+
+private fun lPer100(v: Float): String = "%.1f".format(v)
 
 /**
  * Модалка «Все расходы категории X». Показывает плоский список всех записей
@@ -1214,16 +1414,30 @@ private fun MileageAddDialog(
 @Composable
 private fun ExpenseAddDialog(
     editing: com.obd2monitor.domain.model.ExpenseEntry? = null,
+    /** Пробег на дату по журналу пробега (null — журнал пуст). */
+    odometerOn: (Long) -> Int?,
     onDismiss: () -> Unit,
-    onSave: (Long, ExpenseType, String, Float) -> Unit,
+    /** дата, категория, описание, сумма, пробег, литры, полный бак */
+    onSave: (Long, ExpenseType, String, Float, Int?, Float?, Boolean) -> Unit,
     onDelete: (() -> Unit)? = null,
 ) {
     var dateMs by remember { mutableStateOf(editing?.date ?: System.currentTimeMillis()) }
+    // Новый расход: пробег берётся по журналу на дату и следует за сменой даты,
+    // пока его не изменили вручную. У существующей записи — сохранённый пробег,
+    // а значение по журналу предлагается подсказкой, если отличается.
+    var odoText by remember {
+        mutableStateOf((editing?.odometerKm ?: odometerOn(dateMs))?.toString().orEmpty())
+    }
+    var odoEdited by remember { mutableStateOf(editing != null) }
+    val journalOdo = odometerOn(dateMs)
     var type by remember { mutableStateOf(editing?.type ?: ExpenseType.MAINTENANCE) }
     var description by remember { mutableStateOf(editing?.description.orEmpty()) }
     var amountText by remember {
         mutableStateOf(editing?.amountRub?.let { if (it == it.toInt().toFloat()) it.toInt().toString() else it.toString() }.orEmpty())
     }
+    // Литры у старых заправок подхватываются из описания («40л 92»).
+    var litersText by remember { mutableStateOf(editing?.liters?.let { formatNumber(it) }.orEmpty()) }
+    var fullTank by remember { mutableStateOf(editing?.fullTank ?: false) }
     val focusManager = LocalFocusManager.current
     val descriptionFocus = remember { FocusRequester() }
 
@@ -1234,7 +1448,39 @@ private fun ExpenseAddDialog(
         text = {
             DialogBody {
                 FieldGroup(title = "Дата") {
-                    DateField(value = dateMs, onChange = { dateMs = it })
+                    DateField(value = dateMs, onChange = {
+                        dateMs = it
+                        if (!odoEdited) odoText = odometerOn(it)?.toString().orEmpty()
+                    })
+                }
+                FieldGroup(title = "Пробег на одометре", optional = true) {
+                    OutlinedTextField(
+                        value = odoText,
+                        onValueChange = {
+                            odoText = it.filter { ch -> ch.isDigit() }.take(7)
+                            odoEdited = true
+                        },
+                        placeholder = { PlaceholderText("87000") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Number,
+                            imeAction = ImeAction.Done,
+                        ),
+                        keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
+                        colors = mutedTextFieldColors(),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (journalOdo != null && journalOdo.toString() != odoText) {
+                        Text(
+                            "По журналу на эту дату: $journalOdo км · подставить",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = ColorAccent,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable { odoText = journalOdo.toString(); odoEdited = false }
+                                .padding(vertical = 4.dp, horizontal = 2.dp),
+                        )
+                    }
                 }
                 FieldGroup(title = "Категория") {
                     ChipGrid(
@@ -1261,10 +1507,50 @@ private fun ExpenseAddDialog(
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
+                if (type == ExpenseType.FUEL) {
+                    FieldGroup(title = "Литры", hint = "для расчёта расхода по заправкам") {
+                        OutlinedTextField(
+                            value = litersText,
+                            onValueChange = { litersText = it.filter { ch -> ch.isDigit() || ch == '.' || ch == ',' }.take(6) },
+                            placeholder = { PlaceholderText("40") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal, imeAction = ImeAction.Next),
+                            keyboardActions = KeyboardActions(onNext = { descriptionFocus.requestFocus() }),
+                            colors = mutedTextFieldColors(),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        val liters = litersText.replace(',', '.').toFloatOrNull()
+                        val amount = amountText.replace(',', '.').toFloatOrNull()
+                        if (liters != null && liters > 0f && amount != null && amount > 0f) {
+                            Text(
+                                "${"%.2f".format(amount / liters)} ₽ за литр",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = ColorTextSecondary,
+                            )
+                        }
+                    }
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { fullTank = !fullTank },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        androidx.compose.material3.Checkbox(checked = fullTank, onCheckedChange = { fullTank = it })
+                        Column {
+                            Text("Полный бак", style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                "между двумя полными заправками расход считается точно",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = ColorTextSecondary,
+                            )
+                        }
+                    }
+                }
                 FieldGroup(title = "Описание", optional = true) {
                     OutlinedTextField(
                         value = description,
-                        onValueChange = { description = it.take(120) },
+                        onValueChange = { description = it.take(500) },
                         placeholder = { PlaceholderText("Например, замена масла и фильтра") },
                         // singleLine: иначе длинное описание раскатывает поле
                         // на несколько строк и нижний край (с курсором) уезжает
@@ -1286,7 +1572,12 @@ private fun ExpenseAddDialog(
         confirmButton = {
             TextButton(onClick = {
                 val amt = amountText.replace(',', '.').toFloatOrNull() ?: return@TextButton
-                onSave(dateMs, type, description, amt)
+                onSave(
+                    dateMs, type, description, amt,
+                    odoText.toIntOrNull()?.takeIf { it > 0 },
+                    litersText.replace(',', '.').toFloatOrNull()?.takeIf { it > 0f },
+                    fullTank,
+                )
             }) { Text("Сохранить") }
         },
         dismissButton = {
@@ -1600,3 +1891,6 @@ private fun <T> ChipGrid(
     }
 }
 
+/** Число без лишних нулей: 40 → «40», 35.9 → «35.9». */
+private fun formatNumber(v: Float): String =
+    if (v == v.toInt().toFloat()) v.toInt().toString() else "%.2f".format(Locale.US, v).trimEnd('0').trimEnd('.')
