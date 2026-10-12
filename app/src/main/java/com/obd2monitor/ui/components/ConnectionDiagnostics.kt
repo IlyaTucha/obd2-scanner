@@ -65,98 +65,63 @@ private data class DiagInfo(val title: String, val detail: String, val color: Co
 private fun analyze(s: ConnectionStatus): DiagInfo? = when (s.state) {
     ConnectionState.DISCONNECTED -> null
     ConnectionState.CONNECTING -> DiagInfo(
-        title = "Подключение к ELM327…",
-        detail = "Открываю Bluetooth-сокет к ${s.deviceAddress ?: "адаптеру"}.",
+        title = "Подключение к адаптеру",
+        detail = "Открывается Bluetooth-соединение с ${s.deviceAddress ?: "адаптером"}.",
         color = ColorWarning,
         icon = Icons.Outlined.HourglassEmpty,
     )
     ConnectionState.INITIALIZING -> DiagInfo(
-        title = "Инициализация ECU…",
-        detail = "Сбрасываю эхо, выбираю протокол, запрашиваю поддерживаемые PID. " +
-            "Если затягивается > 10 c — проверьте, что зажигание включено.",
+        title = "Связь с блоком управления",
+        detail = "Адаптер подбирает протокол и запрашивает список поддерживаемых параметров. " +
+            "Обычно это занимает до 10 секунд, на старых автомобилях — до 30. Зажигание должно быть включено.",
         color = ColorWarning,
         icon = Icons.Outlined.HourglassEmpty,
     )
     ConnectionState.ERROR -> DiagInfo(
-        title = "Ошибка подключения",
-        detail = s.errorMessage?.takeIf { it.isNotBlank() }
-            ?: "Адаптер не отвечает. Проверьте: вставлен ли ELM327 в OBD-разъём, " +
-                "включено ли зажигание, спарен ли адаптер в системе.",
+        title = "Нет связи с адаптером",
+        // Системные сообщения Android приходят по-английски («read failed, socket might
+        // closed…») — показываем только наши, понятные пользователю.
+        detail = (s.errorMessage?.takeIf { msg -> msg.any { it in 'а'..'я' || it in 'А'..'Я' } }?.let { "$it. " } ?: "") +
+            "Проверьте, что адаптер вставлен в OBD-разъём, зажигание включено, а адаптер " +
+            "сопряжён с телефоном в настройках Bluetooth. Приложение повторит попытку автоматически.",
         color = ColorError,
         icon = Icons.Outlined.ErrorOutline,
     )
     ConnectionState.CONNECTED -> when {
-        // Адаптер подключен, но ECU не отдал ни одного PID на 0100 — типично при выключенном зажигании
-        // или нестандартном протоколе.
+        // Адаптер подключён, но ЭБУ не отдал ни одного PID на 0100 — типично при
+        // выключенном зажигании или если адаптер не смог поднять шину.
         s.supportedPidsCount == 0 -> {
             val raw = s.initRawResponse?.take(200)?.replace("\r", " ")?.replace("\n", " ")
-            val isBusInit = raw?.contains("BUS INIT", ignoreCase = true) == true
-            val isUnable = raw?.contains("UNABLE", ignoreCase = true) == true
-            val isStopped = raw?.contains("STOPPED", ignoreCase = true) == true
-            // SEARCHING без последующих hex-байт = ELM так и не залочился на шину.
-            // Технически отличается от UNABLE — там адаптер сдался, а тут просто
-            // не дождались. На практике причина та же: нет ECU на шине.
-            val isSearchingOnly = raw?.contains("SEARCHING", ignoreCase = true) == true && !isUnable
-            val title = when {
-                isBusInit -> "BUS INIT: ERROR — K-line не поднялся"
-                isUnable -> "UNABLE TO CONNECT — ECU не отвечает"
-                isStopped -> "STOPPED — рассинхрон с адаптером"
-                isSearchingOnly -> "SEARCHING — ECU не ответил за время поиска"
-                else -> "ECU не отвечает на запросы"
-            }
-            val detail = when {
-                isBusInit -> "ELM пытается поднять K-line сессию (ISO 9141-2 / KWP slow init), но " +
-                    "ECU не отвечает на 5-baud init-последовательность. Что проверить: " +
-                    "1) Зажигание именно в положении ON (одна позиция до старта стартёра), " +
-                    "не ACC и не «двигатель работает» при старте сессии — на старых Hyundai " +
-                    "ECU отвечает на K-line только при определённой позиции ключа. " +
-                    "2) Заведите двигатель — на холодном ECT < 5 °C ECU может не отвечать. " +
-                    "3) Полностью выньте адаптер из OBD-разъёма на 10 секунд и вставьте обратно — " +
-                    "ELM v1.5 клоны часто залипают в неинициализированном состоянии. " +
-                    "4) В Torque подключение работает, потому что он делает init дольше — " +
-                    "повторите подключение здесь 2–3 раза подряд. " +
-                    "Сырой ответ ELM: «$raw»."
-                isUnable -> "ELM перебрал все протоколы и не смог установить связь. Проверьте: " +
-                    "адаптер физически в OBD-разъёме, зажигание ON, попробуйте перевключить " +
-                    "адаптер. Сырой ответ: «$raw»."
-                isStopped -> "ELM получает команды быстрее, чем успевает обрабатывать (ответ STOPPED). " +
-                    "Это типично для ELM327 v1.5-клонов на низком Bluetooth-канале. Попробуйте: " +
-                    "1) Откл. → Подкл. в настройках (запустит инициализацию заново с длинными " +
-                    "паузами и закрытием предыдущей сессии — ATPC). " +
-                    "2) Удалите Bluetooth-сопряжение в системных настройках Android и заново " +
-                    "спарьте адаптер — иногда помогает сбросить кэш. " +
-                    "3) Подключитесь к OpenDiag/Torque один раз — они оставляют ECU в активной " +
-                    "сессии, после чего наше приложение цепляется без slow-init. " +
-                    "Сырой ответ: «$raw»."
-                isSearchingOnly -> "ELM начал поиск протокола (SEARCHING), но ECU так и не ответил за " +
-                    "30 секунд. На K-line авто (Hyundai Accent 2008 G4EE) это самый частый сбой. Что проверить: " +
-                    "1) Зажигание именно в положении ON (одна позиция до старта, не ACC). На холодном " +
-                    "ECU без зажигания K-line молчит, и ELM крутит SEARCHING до таймаута. " +
-                    "2) Заведите двигатель — некоторые Hyundai ECU поднимают K-line только при работающем моторе. " +
-                    "3) В настройках выберите профиль авто (Hyundai Accent 1.4 / 1.6) — приложение " +
-                    "сразу попробует KWP fast init вместо медленного auto. " +
-                    "4) Выньте адаптер из OBD-разъёма на 10 секунд и вставьте обратно — " +
-                    "ELM v1.5 клоны после неудачной сессии часто залипают и не выходят без аппаратного сброса. " +
-                    "5) Подключитесь к OpenDiag/Torque — они держат init дольше; если они тоже " +
-                    "не цепляются, проблема в адаптере или зажигании, не в приложении. " +
-                    "Сырой ответ: «$raw»."
-                else -> "Адаптер ${s.elmVersion ?: "ELM327"} подключён, но ECU не вернул " +
-                    "поддерживаемые PID. " +
-                    (if (!raw.isNullOrBlank()) "Сырой ответ: «$raw». " else "") +
-                    "Включите зажигание в ON, переподключите адаптер."
+            val reason = when {
+                raw == null -> null
+                raw.contains("BUS INIT", ignoreCase = true) ->
+                    "Блок управления не ответил на инициализацию K-line (BUS INIT)."
+                raw.contains("UNABLE", ignoreCase = true) ->
+                    "Адаптер перебрал все протоколы, но блок управления не ответил (UNABLE TO CONNECT)."
+                raw.contains("STOPPED", ignoreCase = true) ->
+                    "Адаптер не успевает обрабатывать команды (STOPPED)."
+                raw.contains("SEARCHING", ignoreCase = true) ->
+                    "Адаптер не нашёл протокол за отведённое время (SEARCHING)."
+                else -> null
             }
             DiagInfo(
-                title = title,
-                detail = detail,
+                title = "Блок управления не отвечает",
+                detail = listOfNotNull(
+                    reason,
+                    "Что можно сделать: включить зажигание (или завести двигатель), " +
+                        "выбрать протокол в профиле автомобиля вместо автоматического, " +
+                        "вынуть адаптер из разъёма на 10 секунд и подключиться снова.",
+                    raw?.takeIf { it.isNotBlank() }?.let { "Ответ адаптера: «$it»." },
+                ).joinToString(" "),
                 color = ColorWarning,
                 icon = Icons.Outlined.ErrorOutline,
             )
         }
         s.lastSnapshotAt != null && !s.lastSnapshotHadData -> DiagInfo(
-            title = "ECU отвечает, но без данных",
-            detail = "Поддерживаемых PID: ${s.supportedPidsCount}. На стандартные запросы " +
-                "(скорость / обороты / температура) пришло «NO DATA». Заведите двигатель — " +
-                "большинство PID активны только при работающем моторе.",
+            title = "Блок управления не передаёт данные",
+            detail = "Связь установлена (параметров: ${s.supportedPidsCount}), но на запросы " +
+                "скорости, оборотов и температуры приходит «NO DATA». Многие параметры " +
+                "доступны только при работающем двигателе.",
             color = ColorWarning,
             icon = Icons.Outlined.Info,
         )

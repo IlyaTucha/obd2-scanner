@@ -52,6 +52,15 @@ class TripController @Inject constructor(
      *  AutoSessionManager-watchdog'ом для авто-finish после длительного простоя. */
     val pauseSinceMs: StateFlow<Long?> = _pauseSinceMs.asStateFlow()
 
+    private val _gpsMode = MutableStateFlow(false)
+    /** Сессия начата вручную кнопкой «Запись по GPS». В этом режиме обрыв OBD не
+     *  ставит запись на паузу — маршрут, скорость и пробег пишутся по спутникам. */
+    val gpsMode: StateFlow<Boolean> = _gpsMode.asStateFlow()
+
+    private val _lastGpsFixAt = MutableStateFlow<Long?>(null)
+    /** Время последнего принятого GPS-фикса — UI показывает «ожидание сигнала GPS». */
+    val lastGpsFixAt: StateFlow<Long?> = _lastGpsFixAt.asStateFlow()
+
     private var currentTripId: String? = null
     // Несбросанный delta-pause, который ещё не записали в DB. Флашим раз в FLUSH_EVERY_MS,
     // чтобы не делать update раз в 500 мс.
@@ -128,9 +137,13 @@ class TripController @Inject constructor(
         }
     }
 
+    fun onGpsFix(at: Long) { _lastGpsFixAt.value = at }
+
     /** Вызывать при старте новой сессии. Сбрасывает счётчик. */
-    fun onTripStarted(tripId: String) {
+    fun onTripStarted(tripId: String, gpsMode: Boolean = false) {
         currentTripId = tripId
+        _gpsMode.value = gpsMode
+        _lastGpsFixAt.value = null
         _durationMs.value = 0L
         _pausedMs.value = 0L
         unflushedPauseMs = 0L
@@ -143,15 +156,18 @@ class TripController @Inject constructor(
     /** Усыновление осиротевшей сессии после force-stop'а. Подхватывает уже
      *  накопленные durationMs/pausedMs из БД, чтобы UI показывал корректное
      *  время (а не «00:00:00» сразу после рестарта приложения). */
-    fun onTripAdopted(tripId: String, startTime: Long, pausedMsSoFar: Long) {
+    fun onTripAdopted(tripId: String, startTime: Long, pausedMsSoFar: Long, gpsMode: Boolean) {
         currentTripId = tripId
+        _gpsMode.value = gpsMode
+        _lastGpsFixAt.value = null
         val now = System.currentTimeMillis()
         val elapsed = (now - startTime).coerceAtLeast(0L)
         _pausedMs.value = pausedMsSoFar
         _durationMs.value = (elapsed - pausedMsSoFar).coerceAtLeast(0L)
         unflushedPauseMs = 0L
         lastFlushAt = now
-        // Сессия начинается с паузы — записи нет до восстановления подключения.
+        // Сессия начинается с паузы — записи нет до восстановления подключения
+        // (GPS-сессию снимает с паузы сервис, как только машина поедет).
         _paused.value = true
         // Отсчёт «текущей» паузы стартуем с сейчас. Не с момента app-death, потому что
         // pausedMsSoFar уже содержит downtime (см. AutoSessionManager.adoptOrphanIfAny),
@@ -166,6 +182,8 @@ class TripController @Inject constructor(
         val toFlush = unflushedPauseMs
         currentTripId = null
         unflushedPauseMs = 0L
+        _gpsMode.value = false
+        _lastGpsFixAt.value = null
         _paused.value = false
         _pauseSinceMs.value = null
         _finishRequested.value = false

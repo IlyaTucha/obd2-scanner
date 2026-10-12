@@ -21,5 +21,4 @@ interface TripRepository {
     /** Инкрементальное накопление паузы — пишется TripController'ом раз в ~5 с. */
     suspend fun addPausedMs(tripId: String, deltaMs: Long)
     suspend fun readingsFor(tripId: String): List<OBDReading>
-    fun observeReadings(tripId: String): Flow<List<OBDReading>>
 }

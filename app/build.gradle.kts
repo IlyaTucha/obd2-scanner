@@ -65,7 +65,12 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8: сжатие кода и удаление неиспользуемых ресурсов.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            // Только ARM — все реальные телефоны. x86 нужен лишь эмуляторам, а нативная
+            // библиотека карт на каждую архитектуру весит десятки мегабайт.
+            ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
@@ -117,9 +122,6 @@ dependencies {
     implementation(libs.room.ktx)
     ksp(libs.room.compiler)
 
-    implementation(libs.vico.compose.m3)
-    implementation(libs.vico.core)
-
     implementation(libs.play.services.location)
 
     // Yandex MapKit — нативный мобильный SDK (рисуем карту только в Trip Summary).
@@ -131,7 +133,8 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
 
     implementation(libs.androidx.splashscreen)
-    implementation(libs.accompanist.permissions)
+
+    testImplementation(libs.junit)
 }
 
 kapt { correctErrorTypes = true }

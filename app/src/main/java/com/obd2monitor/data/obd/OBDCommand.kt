@@ -6,11 +6,8 @@ package com.obd2monitor.data.obd
  */
 enum class OBDCommand(val pid: String, val command: String, val responseBytes: Int) {
     // Mode 01 — текущие данные
-    PIDS_SUPPORTED_01_20("0100", "0100", 4),
     ENGINE_LOAD("0104", "0104", 1),
     COOLANT_TEMP("0105", "0105", 1),
-    SHORT_FUEL_TRIM_1("0106", "0106", 1),
-    LONG_FUEL_TRIM_1("0107", "0107", 1),
     INTAKE_MAP("010B", "010B", 1),
     RPM("010C", "010C", 2),
     SPEED("010D", "010D", 1),
@@ -18,20 +15,13 @@ enum class OBDCommand(val pid: String, val command: String, val responseBytes: I
     INTAKE_TEMP("010F", "010F", 1),
     MAF("0110", "0110", 2),
     THROTTLE("0111", "0111", 1),
-    RUN_TIME("011F", "011F", 2),
     FUEL_LEVEL("012F", "012F", 1),
-    BARO_PRESSURE("0133", "0133", 1),
     BATTERY_VOLTAGE("0142", "0142", 2),
-    REL_THROTTLE("0145", "0145", 1),
     AMBIENT_TEMP("0146", "0146", 1),
     FUEL_RATE("015E", "015E", 2),
     OIL_TEMP("015C", "015C", 1),
-    SHORT_FUEL_TRIM_2("0108", "0108", 1),
-    LONG_FUEL_TRIM_2("0109", "0109", 1),
     DISTANCE_WITH_MIL("0121", "0121", 2),
     DISTANCE_SINCE_CLEAR("0131", "0131", 2),
-    ABSOLUTE_LOAD("0143", "0143", 2),
-    AMBIENT_AIR_TEMP("0146", "0146", 1),
 
     // Mode 03 — DTC, Mode 04 — clear DTC
     READ_DTC("03", "03", -1),
@@ -52,7 +42,6 @@ object ELMAtCommand {
     const val HEADERS_OFF = "ATH0"
     const val SPACES_OFF = "ATS0"
     const val ADAPTIVE_TIMING = "ATAT1"
-    const val PROTOCOL_AUTO = "ATSP0"
     const val DESCRIBE_PROTOCOL = "ATDPN"
     const val VERSION = "ATI"
     /** Чтение напряжения на разъёме OBD непосредственно адаптером ELM. Работает всегда. */

@@ -10,7 +10,6 @@ import com.obd2monitor.data.preferences.UserPreferences
 import com.obd2monitor.domain.model.ConnectionState
 import com.obd2monitor.domain.model.ConnectionStatus
 import com.obd2monitor.domain.model.EcuInfo
-import com.obd2monitor.domain.model.UnitsPrefs
 import com.obd2monitor.domain.model.VehicleProfile
 import com.obd2monitor.domain.repository.OBDRepository
 import com.obd2monitor.domain.repository.VehicleProfileRepository
@@ -28,8 +27,6 @@ import javax.inject.Inject
 
 data class SettingsUiState(
     val pairedDevices: List<DeviceInfo> = emptyList(),
-    val units: UnitsPrefs = UnitsPrefs(),
-    val pollIntervalMs: Long = 200L,
     val autoConnect: Boolean = true,
     val ecuInfo: EcuInfo? = null,
     val ecuLoading: Boolean = false,
@@ -56,8 +53,8 @@ class SettingsViewModel @Inject constructor(
     fun exportFullDatabase(uri: Uri) {
         viewModelScope.launch {
             backup.exportFullDbTo(uri)
-                .onSuccess { bytes -> _backupMessage.value = "Полный экспорт выполнен (${bytes / 1024} КБ)" }
-                .onFailure { _backupMessage.value = "Ошибка экспорта: ${it.message}" }
+                .onSuccess { bytes -> _backupMessage.value = "Резервная копия сохранена (${bytes / 1024} КБ)" }
+                .onFailure { _backupMessage.value = "Не удалось сохранить копию: ${it.message}" }
         }
     }
 
@@ -67,10 +64,10 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             backup.stageFullDbImport(uri)
                 .onSuccess {
-                    _backupMessage.value = "Импорт принят. Перезапуск…"
+                    _backupMessage.value = "Копия восстановлена, приложение перезапускается"
                     backup.finalizeFullDbImportAndRestart()
                 }
-                .onFailure { _backupMessage.value = "Ошибка импорта: ${it.message}" }
+                .onFailure { _backupMessage.value = "Не удалось восстановить копию: ${it.message}" }
         }
     }
 
@@ -88,8 +85,6 @@ class SettingsViewModel @Inject constructor(
     )
 
     init {
-        prefs.units.onEach { _state.value = _state.value.copy(units = it) }.launchIn(viewModelScope)
-        prefs.pollIntervalMs.onEach { _state.value = _state.value.copy(pollIntervalMs = it) }.launchIn(viewModelScope)
         prefs.autoConnect.onEach { _state.value = _state.value.copy(autoConnect = it) }.launchIn(viewModelScope)
         // При подключении автоматически читаем паспорт ECU.
         obdRepo.connectionStatus.onEach { st ->
@@ -136,17 +131,6 @@ class SettingsViewModel @Inject constructor(
         val active = activeProfile.value ?: return
         viewModelScope.launch {
             vehicleRepo.upsert(active.copy(fuelPrice = rubPerLiter.coerceAtLeast(0f)))
-        }
-    }
-
-    fun setUnits(prefs: UnitsPrefs) {
-        viewModelScope.launch { this@SettingsViewModel.prefs.setUnits(prefs) }
-    }
-
-    fun setPollInterval(ms: Long) {
-        viewModelScope.launch {
-            prefs.setPollIntervalMs(ms)
-            obdRepo.setPollInterval(ms)
         }
     }
 

@@ -11,8 +11,6 @@ import com.obd2monitor.domain.model.FuelType
  */
 object FuelCalculator {
 
-    private const val R_GAS = 8.314f             // Дж/(моль·К)
-    private const val MOLAR_MASS_AIR = 28.97f    // г/моль
     private const val DEFAULT_VE = 0.85f         // объёмная эффективность
     private const val MAX_REASONABLE_L_PER_100 = 300f
 
@@ -43,9 +41,6 @@ object FuelCalculator {
         val airMassGs = (mapPa * volumePerSec) / (287f * tempK) * 1000f     // г/с
         return fromMAF(airMassGs, fuel)
     }
-
-    /** Метод 3: PID 01 5E уже отдаёт л/ч. */
-    fun fromFuelRatePid(litersPerHour: Float): Float = litersPerHour.coerceAtLeast(0f)
 
     fun estimateIdleLitersPerHour(displacementL: Float, rpm: Float): Float {
         if (displacementL <= 0f || rpm <= 0f) return 0f
@@ -79,8 +74,8 @@ object FuelCalculator {
         if (timestamps.size < 2) return 0f
         var total = 0f
         for (i in 1 until timestamps.size) {
-            val dtH = (timestamps[i] - timestamps[i - 1]) / 3600000f
-            if (dtH <= 0f || dtH > 0.1f) continue
+            val dtH = TripMath.segmentHours(timestamps[i - 1], timestamps[i])
+            if (dtH <= 0f) continue
             val c0 = normalizedConsumption(consumptionLPer100[i - 1])
             val c1 = normalizedConsumption(consumptionLPer100[i])
             val avgCons = (c0 + c1) / 2f

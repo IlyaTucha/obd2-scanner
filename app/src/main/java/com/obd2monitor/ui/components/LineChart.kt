@@ -169,7 +169,6 @@ fun LineChart(
         val window = values.subList(startIdx, endIdx + 1)
         if (window.size < 2) return@Canvas
 
-        val total = values.size
         val visibleFrac = 1f / zoom
         val centerFrac = (0.5f + offsetFracX).coerceIn(visibleFrac / 2f, 1f - visibleFrac / 2f)
         val startFrac = (centerFrac - visibleFrac / 2f).coerceAtLeast(0f)

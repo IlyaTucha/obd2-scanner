@@ -10,10 +10,14 @@ import com.obd2monitor.domain.model.VehicleProfile
 import com.obd2monitor.domain.repository.TripRepository
 import com.obd2monitor.domain.repository.VehicleProfileRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import com.obd2monitor.data.obd.ReadingMetrics
+import com.obd2monitor.data.obd.TripMath
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 data class ParamSummary(
@@ -58,67 +62,43 @@ class TripSummaryViewModel @Inject constructor(
         val trip = tripRepo.getTrip(tripId)
         val readings = tripRepo.readingsFor(tripId)
         val profile = trip?.vehicleProfileId?.let { vehicleRepo.getById(it) }
-        val points = readings.mapNotNull { r ->
-            val lat = r.latitude; val lon = r.longitude
-            if (lat != null && lon != null) GeoPoint(lat, lon, r.timestamp) else null
-        }
-        val params = buildParameters(readings, trip, profile)
-        val cost = if (trip != null && profile != null && profile.fuelPrice > 0f && trip.fuelUsedLiters > 0f) {
-            trip.fuelUsedLiters * profile.fuelPrice
-        } else null
-        val accelSeries = computeAccelSeries(readings)
-        val peakAccel = accelSeries.maxOrNull()?.takeIf { it > 0.05f }
-        val peakBrake = accelSeries.minOrNull()?.takeIf { it < -0.05f }
-        _state.value = TripSummaryUiState(
-            trip = trip,
-            routePoints = points,
-            parameters = params,
-            loading = false,
-            tripCostRub = cost,
-            peakAccelMs2 = peakAccel,
-            peakBrakeMs2 = peakBrake,
-        )
-    }
-
-    private fun computeAccelSeries(readings: List<OBDReading>): List<Float> {
-        if (readings.size < 2) return emptyList()
-        return readings.indices.map { i ->
-            val start = (i - 4).coerceAtLeast(0)
-            val first = readings[start]
-            val last = readings[i]
-            val dts = (last.timestamp - first.timestamp) / 1000f
-            if (dts <= 0.05f) {
-                0f
-            } else {
-                val dvMs = (last.speedKmh - first.speedKmh) / 3.6f
-                dvMs / dts
+        // Разбор десятков тысяч замеров — не в главном потоке.
+        _state.value = withContext(Dispatchers.Default) {
+            val points = readings.mapNotNull { r ->
+                val lat = r.latitude; val lon = r.longitude
+                if (lat != null && lon != null) GeoPoint(lat, lon, r.timestamp) else null
             }
+            val accel = TripMath.accelSeries(readings)
+            val cost = if (trip != null && profile != null && profile.fuelPrice > 0f && trip.fuelUsedLiters > 0f) {
+                trip.fuelUsedLiters * profile.fuelPrice
+            } else null
+            TripSummaryUiState(
+                trip = trip,
+                routePoints = points,
+                parameters = buildParameters(readings, accel, trip, profile),
+                loading = false,
+                tripCostRub = cost,
+                peakAccelMs2 = accel.maxOrNull()?.takeIf { it > 0.05f },
+                peakBrakeMs2 = accel.minOrNull()?.takeIf { it < -0.05f },
+            )
         }
     }
 
     private fun buildParameters(
         readings: List<OBDReading>,
+        accel: List<Float>,
         trip: Trip?,
         profile: VehicleProfile?,
     ): List<ParamSummary> {
         if (readings.isEmpty()) return emptyList()
-        // Прореживаем для графиков: не более ~120 точек, чтобы не тормозить рендер.
+        // Для графиков прореживаем до ~120 точек, чтобы не тормозить отрисовку.
         val step = (readings.size / 120).coerceAtLeast(1)
-        val sampled = readings.filterIndexed { i, _ -> i % step == 0 }
 
-        fun summary(
-            key: String,
-            title: String,
-            unit: String,
-            avgOverride: Float? = null,
-            sel: (OBDReading) -> Float,
-        ): ParamSummary? {
-            val values = readings.map(sel).filter { it.isFinite() }
-            if (values.isEmpty()) return null
-            val nonZero = values.filter { it != 0f }
-            // Если параметр всегда был 0 (PID не отдавался) — не показываем.
-            if (nonZero.isEmpty()) return null
-            val series = sampled.map(sel)
+        fun summary(key: String, title: String, unit: String, avgOverride: Float? = null): ParamSummary? {
+            val all = if (key == "accel") accel else ReadingMetrics.series(key, readings, profile)
+            val values = all.filter { it.isFinite() }
+            // Параметр, который ни разу не отдавался (всегда 0), не показываем.
+            if (values.none { it != 0f }) return null
             return ParamSummary(
                 key = key,
                 title = title,
@@ -126,97 +106,36 @@ class TripSummaryViewModel @Inject constructor(
                 min = values.min(),
                 avg = avgOverride ?: values.average().toFloat(),
                 max = values.max(),
-                series = series,
+                series = all.filterIndexed { i, _ -> i % step == 0 },
             )
         }
 
-        // ── Расчётные метрики из сохранённых PID. Важно: считаем КАЖДЫЙ раз
-        // здесь же, чтобы не плодить колонки в OBDReadingEntity. Формулы те же,
-        // что в OBDRepositoryImpl.readSnapshot — для согласованности.
-        val maxTorqueNm = (profile?.maxTorqueNm ?: 130).toFloat()
-        val maxPowerKw = (profile?.maxPowerKw ?: 70).toFloat()
-        val coolantTargetC = (profile?.normalCoolantTempC?.first ?: 85).toFloat()
-        val accelValues = computeAccelSeries(readings)
-
-        fun powerKwOf(r: OBDReading): Float = when {
-            r.mafGs > 0f -> (r.mafGs * 0.88f).coerceIn(0f, maxPowerKw * 1.1f)
-            r.engineLoadPercent > 0f && r.rpm > 0f -> {
-                val tq = r.engineLoadPercent / 100f * maxTorqueNm
-                (tq * r.rpm / 9549f).coerceIn(0f, maxPowerKw * 1.1f)
-            }
-            else -> 0f
-        }
-
-        fun powerHpOf(r: OBDReading): Float = powerKwOf(r) * 1.35962f
-
-        fun torqueOf(r: OBDReading): Float {
-            val p = powerKwOf(r)
-            return if (p > 0f && r.rpm > 200f) (p * 9549f / r.rpm).coerceIn(0f, maxTorqueNm * 1.2f) else 0f
-        }
-
-        fun vacuumOf(r: OBDReading): Float =
-            if (r.mapKpa > 0f) (101f - r.mapKpa).coerceAtLeast(0f) else 0f
-
-        fun warmupOf(r: OBDReading): Float = if (r.coolantTempC > 0f) {
-            ((r.coolantTempC - 20f) / (coolantTargetC - 20f) * 100f).coerceIn(0f, 100f)
-        } else 0f
-
-        // СР. в карточке «Скорость» используем то же значение, что и в верхней сводке
-        // (distance / wall-time из Trip). Иначе они расходились: верхняя СР. — distance/duration,
-        // а в карточке — арифметическое среднее samples (включая стоянки), и значения отличались.
-        // Аналогично для «Расход»: верхний блок ТОПЛИВО показывает avgFuelConsumption
-        // (= total_liters / distance × 100, корректно интегрированный), а арифметическое среднее
-        // мгновенных л/100км по точкам было заметно меньше из-за нулей на простоях.
+        // «Сред.» для скорости и расхода берём из итогов сессии (пробег / время в пути,
+        // литры / пробег), а не арифметическое среднее замеров — иначе стоянки и
+        // всплески мгновенного расхода на малой скорости искажают цифру.
         return listOfNotNull(
-            // Самые наглядные «живые» метрики первыми.
-            summary("speed", "Скорость", "км/ч", avgOverride = trip?.avgSpeedKmh) { it.speedKmh },
-            summary("rpm", "Обороты", "об/мин") { it.rpm },
-            summary("power", "Мощность", "л.с.", sel = ::powerHpOf),
-            summary("torque", "Крутящий момент", "Нм", sel = ::torqueOf),
-            accelSummary(readings, sampled, accelValues),
-            summary("fuel", "Расход", "л/100км", avgOverride = trip?.avgFuelConsumption) {
-                // Без clamp — показываем сырое значение. Avg остаётся честным
-                // (avgOverride ← trip.avgFuelConsumption из integrate, а не арифметика).
-                it.instantFuelLPer100
-            },
-            summary("load", "Усилие двигателя", "%") { it.engineLoadPercent },
-            summary("throttle", "Дроссель", "%") { it.throttlePercent },
-            summary("vacuum", "Вакуум впуска", "кПа", sel = ::vacuumOf),
-            summary("warmup", "Прогрев", "%", sel = ::warmupOf),
-            // Сырые PID
-            summary("coolant", "Темп. ОЖ", "°C") { it.coolantTempC },
-            summary("battery", "Бортсеть", "В") { it.batteryVoltage },
-            summary("intake", "Темп. впуска", "°C") { it.intakeTempC },
-            summary("map", "Давление впуска", "кПа") { it.mapKpa },
-            summary("timing", "Угол зажигания", "°") { it.ignitionTimingDeg },
-            summary("oil", "Темп. масла", "°C") { it.oilTempC },
-            summary("stft", "Краткая коррекция", "%") { it.shortFuelTrim1Pct },
-            summary("ltft", "Долгая коррекция", "%") { it.longFuelTrim1Pct },
-            summary("fuellevel", "Уровень бака", "%") { it.fuelLevelPercent },
-            summary("maf", "MAF", "г/с") { it.mafGs },
-            summary("distmil", "Пробег с Check Engine", "км") { it.distanceMilKm },
-            summary("distclear", "Пробег после сброса", "км") { it.distanceSinceClearKm },
-        )
-    }
-
-    private fun accelSummary(
-        readings: List<OBDReading>,
-        sampled: List<OBDReading>,
-        accelValues: List<Float>,
-    ): ParamSummary? {
-        val values = accelValues.filter { it.isFinite() }
-        if (values.none { it != 0f }) return null
-        val sampledValues = sampled.map { reading ->
-            accelValues.getOrElse(readings.indexOf(reading)) { 0f }
-        }
-        return ParamSummary(
-            key = "accel",
-            title = "Ускорение",
-            unit = "м/с²",
-            min = values.min(),
-            avg = values.average().toFloat(),
-            max = values.max(),
-            series = sampledValues,
+            summary("speed", "Скорость", "км/ч", avgOverride = trip?.avgSpeedKmh),
+            summary("rpm", "Обороты", "об/мин"),
+            summary("power", "Мощность", "л.с."),
+            summary("torque", "Крутящий момент", "Н·м"),
+            summary("accel", "Ускорение", "м/с²"),
+            summary("fuel", "Расход", "л/100 км", avgOverride = trip?.avgFuelConsumption),
+            summary("load", "Нагрузка двигателя", "%"),
+            summary("throttle", "Дроссель", "%"),
+            summary("vacuum", "Разрежение во впуске", "кПа"),
+            summary("warmup", "Прогрев", "%"),
+            summary("coolant", "Охлаждающая жидкость", "°C"),
+            summary("battery", "Бортсеть", "В"),
+            summary("intake", "Воздух на впуске", "°C"),
+            summary("map", "Давление впуска", "кПа"),
+            summary("timing", "Угол зажигания", "°"),
+            summary("oil", "Температура масла", "°C"),
+            summary("stft", "Краткая коррекция топлива", "%"),
+            summary("ltft", "Долгая коррекция топлива", "%"),
+            summary("fuellevel", "Топливо в баке", "%"),
+            summary("maf", "Расход воздуха", "г/с"),
+            summary("distmil", "Пробег с Check Engine", "км"),
+            summary("distclear", "Пробег после сброса ошибок", "км"),
         )
     }
 

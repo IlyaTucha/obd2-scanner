@@ -4,6 +4,9 @@
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">false</item>
+        <!-- Фон окна = фон приложения: иначе в горизонтали зона выреза камеры
+             закрашивалась серым фоном темы Material. -->
+        <item name="android:windowBackground">@android:color/black</item>
     </style>
 
     <style name="Theme.OBD2Monitor.Splash" parent="Theme.SplashScreen">

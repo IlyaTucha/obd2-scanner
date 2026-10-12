@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -50,6 +51,8 @@ import com.obd2monitor.domain.model.GeoPoint
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.obd2monitor.ui.components.LineChart
+import com.obd2monitor.ui.components.MaxContentWidth
+import com.obd2monitor.ui.components.mapHeight
 import com.obd2monitor.ui.components.StatBox
 import com.obd2monitor.ui.components.YandexMapView
 import com.obd2monitor.ui.theme.ColorCard
@@ -86,14 +89,18 @@ fun TripSummaryScreen(
             .background(MaterialTheme.colorScheme.background)
             .onGloballyPositioned { captureBounds = it.boundsInRoot() }
             .verticalScroll(scrollState),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(8.dp)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.widthIn(max = MaxContentWidth).fillMaxWidth().padding(8.dp),
+        ) {
             IconButton(onClick = onBack) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Назад")
             }
             Icon(Icons.Filled.Flag, contentDescription = null, tint = ColorNeutral, modifier = Modifier.size(22.dp))
             Spacer(Modifier.width(8.dp))
-            Text("ОТЧЁТ СЕССИИ", style = MaterialTheme.typography.headlineSmall)
+            Text("Отчёт сессии", style = MaterialTheme.typography.headlineSmall)
         }
 
         if (state.loading) {
@@ -119,7 +126,7 @@ fun TripSummaryScreen(
         val timeBreakdown = "Всего ${formatHms(trip.durationMs)} · в пути ${formatHms(trip.activeMs)} · на паузе ${formatHms(trip.pausedMs)}"
 
         Column(
-            modifier = Modifier.padding(horizontal = 14.dp),
+            modifier = Modifier.widthIn(max = MaxContentWidth).fillMaxWidth().padding(horizontal = 14.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(period, color = ColorTextSecondary, style = MaterialTheme.typography.bodyMedium)
@@ -130,7 +137,7 @@ fun TripSummaryScreen(
                 Box(
                     Modifier
                         .fillMaxWidth()
-                        .height(260.dp)
+                        .height(mapHeight(260.dp))
                         .clip(RoundedCornerShape(16.dp))
                         .background(ColorCard),
                 ) {
@@ -142,7 +149,7 @@ fun TripSummaryScreen(
                 }
             } else {
                 Text(
-                    "GPS-точки не записаны (нет разрешения на геолокацию или GPS был выключен).",
+                    "Маршрут не записан: не было доступа к геолокации или сигнала GPS.",
                     color = ColorTextSecondary,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -158,11 +165,14 @@ fun TripSummaryScreen(
                 ),
             )
 
-            FuelCard(
-                fuelLiters = trip.fuelUsedLiters,
-                avgConsumption = trip.avgFuelConsumption,
-                tripCostRub = state.tripCostRub,
-            )
+            // У сессии, записанной только по GPS, данных о топливе нет — блок не показываем.
+            if (trip.fuelUsedLiters > 0f) {
+                FuelCard(
+                    fuelLiters = trip.fuelUsedLiters,
+                    avgConsumption = trip.avgFuelConsumption,
+                    tripCostRub = state.tripCostRub,
+                )
+            }
 
             // Расчётные показатели за сессию: пиковое ускорение, макс скорость.
             val extraStats = buildList {
@@ -181,7 +191,7 @@ fun TripSummaryScreen(
             // Параметры — мин/сред/макс + кривая по каждому
             if (state.parameters.isNotEmpty()) {
                 Text(
-                    "ПАРАМЕТРЫ ЗА СЕССИЮ",
+                    "Параметры за сессию",
                     style = MaterialTheme.typography.labelMedium,
                     color = ColorNeutral,
                 )
@@ -378,7 +388,7 @@ private fun FuelCard(
                     modifier = Modifier.size(18.dp),
                 )
                 Spacer(Modifier.width(8.dp))
-                Text("ТОПЛИВО", color = ColorNeutral, style = MaterialTheme.typography.labelMedium)
+                Text("Топливо", color = ColorNeutral, style = MaterialTheme.typography.labelMedium)
             }
             Spacer(Modifier.height(6.dp))
             Row {
@@ -388,7 +398,7 @@ private fun FuelCard(
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text("Средний", color = ColorTextSecondary, style = MaterialTheme.typography.labelSmall)
-                    Text("%.1f л/100км".format(avgConsumption), style = MaterialTheme.typography.headlineSmall)
+                    Text("%.1f л/100 км".format(avgConsumption), style = MaterialTheme.typography.headlineSmall)
                 }
             }
             // Стоимость показывается только когда в профиле задана fuelPrice

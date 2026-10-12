@@ -8,8 +8,10 @@ import com.obd2monitor.data.obd.OBDParser
 import com.obd2monitor.data.obd.PIDRepository
 import com.obd2monitor.domain.model.ConnectionState
 import com.obd2monitor.domain.model.ConnectionStatus
-import com.obd2monitor.domain.model.DTCCode
+import com.obd2monitor.domain.model.DTCStatus
+import com.obd2monitor.domain.model.DtcScanResult
 import com.obd2monitor.domain.model.EcuInfo
+import com.obd2monitor.domain.model.FreezeFrame
 import com.obd2monitor.domain.model.OBDData
 import com.obd2monitor.domain.model.OBDProtocol
 import com.obd2monitor.domain.repository.DTCRepository
@@ -50,7 +52,6 @@ class OBDRepositoryImpl @Inject constructor(
 
     private val _status = MutableStateFlow(ConnectionStatus())
     private val _liveData = MutableSharedFlow<OBDData>(replay = 1, extraBufferCapacity = 16)
-    private val _pollIntervalMs = MutableStateFlow(50L)
     private var pollJob: Job? = null
     private var recoveryJob: Job? = null
 
@@ -72,6 +73,11 @@ class OBDRepositoryImpl @Inject constructor(
     // синхронно с RPM/throttle — терять отзывчивость по педали газа.
     private companion object {
         const val SLOW_EVERY = 5
+        /** Пауза между снимками. Сам снимок (5 «горячих» PID) занимает 100–300 мс,
+         *  так что итоговая частота 3–7 Гц; пауза лишь даёт адаптеру передышку. */
+        const val POLL_PAUSE_MS = 50L
+        /** Mode 03/07/0A на K-line и при нескольких ЭБУ отвечают дольше обычного PID. */
+        const val DTC_READ_TIMEOUT_MS = 8_000L
 
         // ── Антиспайк скорости ──
         /** Максимальное физически правдоподобное изменение скорости, км/ч за секунду.
@@ -236,7 +242,7 @@ class OBDRepositoryImpl @Inject constructor(
                 deviceAddress = addr,
                 deviceName = prev.deviceName,
                 elmVersion = init.version.ifBlank { prev.elmVersion },
-                protocol = init.protocol ?: prev.protocol,
+                protocol = init.protocol,
                 supportedPidsCount = init.supportedPids.size,
                 initRawResponse = init.lastRawResponse.takeIf { it.isNotBlank() } ?: prev.initRawResponse,
             )
@@ -300,7 +306,7 @@ class OBDRepositoryImpl @Inject constructor(
         _status.value = _status.value.copy(state = ConnectionState.INITIALIZING)
         val init = elm.initialize(preferredProtocol = preferred)
         if (init.supportedPids.isEmpty()) {
-            throw IOException("Handshake не удался: ECU не вернул PID-маску")
+            throw IOException("Блок управления не ответил на запрос параметров")
         }
         return init
     }
@@ -318,10 +324,6 @@ class OBDRepositoryImpl @Inject constructor(
             synchronized(cacheLock) { lastSnapshot = OBDData() }
             speedAccepted = null; speedPending = null
         }
-    }
-
-    override suspend fun setPollInterval(intervalMs: Long) {
-        _pollIntervalMs.value = intervalMs.coerceIn(50L, 5000L)
     }
 
     private fun startPolling() {
@@ -443,7 +445,7 @@ class OBDRepositoryImpl @Inject constructor(
                                         _status.value = _status.value.copy(
                                             state = ConnectionState.CONNECTED,
                                             elmVersion = res.version.ifBlank { prev.elmVersion },
-                                            protocol = res.protocol ?: prev.protocol,
+                                            protocol = res.protocol,
                                             supportedPidsCount = res.supportedPids.size,
                                             initRawResponse = res.lastRawResponse.takeIf { it.isNotBlank() } ?: prev.initRawResponse,
                                         )
@@ -492,7 +494,7 @@ class OBDRepositoryImpl @Inject constructor(
                     // период следующим (чтобы счётчик stale не сработал сразу же).
                     lastDataAt = System.currentTimeMillis()
                 }
-                delay(_pollIntervalMs.value)
+                delay(POLL_PAUSE_MS)
             }
         }
     }
@@ -661,35 +663,77 @@ class OBDRepositoryImpl @Inject constructor(
         return runCatching { block() }.getOrNull()
     }
 
-    override suspend fun readDTC(): List<DTCCode> = ioMutex.withLock {
-        val confirmed = runCatching {
-            OBDParser.parseDTCList(bt.sendRaw(OBDCommand.READ_DTC.command), mode = 3)
-        }.getOrDefault(emptyList())
-        val pending = runCatching {
-            OBDParser.parseDTCList(bt.sendRaw(OBDCommand.READ_PENDING_DTC.command), mode = 7)
-        }.getOrDefault(emptyList())
-        val permanent = runCatching {
-            OBDParser.parseDTCList(bt.sendRaw(OBDCommand.READ_PERMANENT_DTC.command), mode = 10)
-        }.getOrDefault(emptyList())
-        val all = (confirmed + pending + permanent).distinct()
-        val described = dtcRepo.describeAll(all)
-        // Прокидываем статус
-        described.map { c ->
-            val status = when {
-                permanent.contains(c.code) -> com.obd2monitor.domain.model.DTCStatus.PERMANENT
-                confirmed.contains(c.code) -> com.obd2monitor.domain.model.DTCStatus.CONFIRMED
-                pending.contains(c.code) -> com.obd2monitor.domain.model.DTCStatus.PENDING
-                else -> com.obd2monitor.domain.model.DTCStatus.CONFIRMED
+    override suspend fun scanDtc(): DtcScanResult {
+        // Без живой связи все запросы молча падали, и экран показывал «ошибок нет».
+        if (_status.value.state != ConnectionState.CONNECTED) {
+            throw IOException("Адаптер не подключён")
+        }
+        return ioMutex.withLock {
+            // Каждый запрос — отдельно: часть ЭБУ не поддерживает Mode 07/0A и отвечает
+            // «NO DATA» или «?», это не повод терять ответ на Mode 03.
+            suspend fun read(cmd: OBDCommand, mode: Int): List<String>? = runCatching {
+                val raw = bt.sendRaw(cmd.command, timeoutMs = DTC_READ_TIMEOUT_MS)
+                if (raw.isBlank() || OBDParser.cleanBytes(raw).none { it == mode + 0x40 }) {
+                    // Ответ без заголовка режима: «NO DATA» — кодов нет, «?»/мусор — не поддерживается.
+                    if (raw.contains("NO DATA", ignoreCase = true)) emptyList() else null
+                } else OBDParser.parseDTCList(raw, mode)
+            }.getOrNull()
+
+            val confirmed = read(OBDCommand.READ_DTC, 0x03)
+            val pending = read(OBDCommand.READ_PENDING_DTC, 0x07)
+            val permanent = read(OBDCommand.READ_PERMANENT_DTC, 0x0A)
+            val answered = listOf(confirmed, pending, permanent).count { it != null }
+            if (answered == 0) throw IOException("Блок управления не ответил на запрос ошибок")
+
+            val monitor = runCatching { OBDParser.parseMonitorStatus(bt.sendRaw("0101")) }.getOrNull()
+            val freeze = runCatching { readFreezeFrame() }.getOrNull()
+
+            val all = (confirmed.orEmpty() + pending.orEmpty() + permanent.orEmpty()).distinct()
+            val described = dtcRepo.describeAll(all).map { c ->
+                val status = when (c.code) {
+                    in permanent.orEmpty() -> DTCStatus.PERMANENT
+                    in confirmed.orEmpty() -> DTCStatus.CONFIRMED
+                    in pending.orEmpty() -> DTCStatus.PENDING
+                    else -> DTCStatus.CONFIRMED
+                }
+                c.copy(status = status)
             }
-            c.copy(status = status)
+            DtcScanResult(
+                codes = described,
+                monitorStatus = monitor,
+                freezeFrame = freeze,
+                answeredRequests = answered,
+            )
         }
     }
 
-    override suspend fun clearDTC(): Boolean = ioMutex.withLock {
-        runCatching { bt.sendRaw(OBDCommand.CLEAR_DTC.command) }.isSuccess
+    /** Стоп-кадр (Mode 02, кадр 0): основные параметры в момент фиксации ошибки. */
+    private suspend fun readFreezeFrame(): FreezeFrame? {
+        val dtc = OBDParser.parseFreezeFrameDtc(bt.sendRaw("020200")) ?: return null
+        suspend fun data(pid: Int): List<Int>? = runCatching {
+            OBDParser.freezePayload(bt.sendRaw("02%02X00".format(pid)), pid)
+        }.getOrNull()?.takeIf { it.isNotEmpty() }
+        val values = mutableListOf<Pair<String, String>>()
+        data(0x0C)?.takeIf { it.size >= 2 }?.let { values += "Обороты" to "${(it[0] * 256 + it[1]) / 4} об/мин" }
+        data(0x0D)?.let { values += "Скорость" to "${it[0]} км/ч" }
+        data(0x05)?.let { values += "Охлаждающая жидкость" to "${it[0] - 40} °C" }
+        data(0x04)?.let { values += "Нагрузка" to "%.0f %%".format(it[0] * 100f / 255f) }
+        data(0x0B)?.let { values += "Давление впуска" to "${it[0]} кПа" }
+        data(0x06)?.let { values += "Краткая коррекция" to "%+.1f %%".format((it[0] - 128) * 100f / 128f) }
+        data(0x07)?.let { values += "Долгая коррекция" to "%+.1f %%".format((it[0] - 128) * 100f / 128f) }
+        return FreezeFrame(dtc, values)
     }
 
-    override suspend fun supportedPids(): List<String> = pids.all()
+    override suspend fun clearDTC(): Boolean {
+        if (_status.value.state != ConnectionState.CONNECTED) return false
+        return ioMutex.withLock {
+            // Успех — только явный ответ «44». На «?» или NO DATA блок код не стёр
+            // (часто — двигатель заведён или ЭБУ требует зажигание без запуска мотора).
+            runCatching {
+                OBDParser.cleanBytes(bt.sendRaw(OBDCommand.CLEAR_DTC.command, timeoutMs = DTC_READ_TIMEOUT_MS)).contains(0x44)
+            }.getOrDefault(false)
+        }
+    }
 
     override suspend fun readEcuInfo(): EcuInfo = ioMutex.withLock {
         // Эти PID может не отдавать ECU старого Hyundai/Lada — поэтому wrap в runCatching.

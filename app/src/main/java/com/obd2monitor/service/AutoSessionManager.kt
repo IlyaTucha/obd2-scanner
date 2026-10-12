@@ -3,6 +3,7 @@ package com.obd2monitor.service
 import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
+import com.obd2monitor.data.preferences.UserPreferences
 import com.obd2monitor.domain.model.ConnectionState
 import com.obd2monitor.domain.repository.OBDRepository
 import com.obd2monitor.domain.repository.TripRepository
@@ -14,21 +15,25 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Авто-сессии:
- *  - при подключении к OBD сессия запускается сама,
- *  - при отключении — закрывается,
- *  - при «частичном разрыве» (CONNECTED, но данные не приходят >10 c) — ставим на паузу
- *    через TripController.setPaused(true). Сессия остаётся открытой, запись OBD-readings
- *    приостанавливается до восстановления потока данных.
+ * Жизненный цикл сессий:
+ *  - при подключении к OBD сессия запускается сама;
+ *  - кнопкой «Запись по GPS» сессию можно начать и без адаптера — маршрут, скорость
+ *    и пробег пишутся по спутникам, а если адаптер подключится, его данные добавятся
+ *    в ту же сессию;
+ *  - закрывается сессия только явным «Завершить» (или после 8 ч непрерывной паузы);
+ *  - обрыв связи с OBD-сессией ставит её на паузу, GPS-сессия продолжает запись.
  */
 @Singleton
 class AutoSessionManager @Inject constructor(
@@ -39,8 +44,14 @@ class AutoSessionManager @Inject constructor(
     private val startTrip: StartTripUseCase,
     private val finishTrip: FinishTripUseCase,
     private val controller: TripController,
+    private val tracker: ActiveTripTracker,
+    private val prefs: UserPreferences,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /** Все переходы открыта/закрыта сессия идут под этим мьютексом: слушатель статуса,
+     *  кнопки UI и watchdog'и иначе могли бы одновременно открыть две сессии или
+     *  дважды закрыть одну. */
+    private val tripMutex = Mutex()
     private var lastState: ConnectionState = ConnectionState.DISCONNECTED
     private var currentTripId: String? = null
     private var started = false
@@ -58,59 +69,15 @@ class AutoSessionManager @Inject constructor(
     fun start() {
         if (started) return
         started = true
-        // Запускаем последовательно: сначала усыновление осиротевшей сессии (если есть),
-        // потом подписка на connectionStatus. Это критично — если listener стартует
-        // раньше, чем currentTripId выставлен в id осиротевшего trip'а, то на первое же
-        // CONNECTED (MainActivity делает attemptAutoConnect параллельно) сработает ветка
-        // «currentTripId == null → создать новый trip», и старый осиротевший останется
-        // лежать в БД незакрытым.
+        // Сначала усыновление осиротевшей сессии, потом подписка на connectionStatus:
+        // иначе первое же CONNECTED (auto-connect в MainActivity идёт параллельно)
+        // открыло бы новую сессию, а старая осталась бы в БД незакрытой.
         scope.launch {
-            runCatching { adoptOrphanIfAny() }
+            runCatching { tripMutex.withLock { adoptOrphanIfAny() } }
             obdRepo.connectionStatus.onEach { status ->
                 val state = status.state
                 try {
-                    when {
-                        // Переход → CONNECTED: открываем новую сессию (если еще нет открытой).
-                        state == ConnectionState.CONNECTED && currentTripId == null -> {
-                            val profile = vehicleRepo.observeActive().firstOrNull()
-                            if (profile != null) {
-                                val tripId = startTrip(profile.id)
-                                currentTripId = tripId
-                                controller.onTripStarted(tripId)
-                                startService()
-                            }
-                        }
-                        // Переход → DISCONNECTED/ERROR с открытой сессией.
-                        //
-                        // Закрываем сессию ТОЛЬКО если пользователь явно нажал
-                        // «Завершить» (controller.requestFinish() ставит флаг). Иначе —
-                        // ставим на паузу и оставляем trip открытым: BT может оборваться
-                        // потому что юзер вышел из машины / заглушил двигатель → когда
-                        // вернётся и ELM снова подключится, запись продолжится в ту же
-                        // сессию. Без этого любой разрыв закрывал бы trip, и продолжать
-                        // поездку приходилось бы вручную каждый раз.
-                        (state == ConnectionState.DISCONNECTED || state == ConnectionState.ERROR) &&
-                            currentTripId != null -> {
-                            if (controller.consumeFinishRequest()) {
-                                val id = currentTripId
-                                currentTripId = null
-                                controller.onTripFinished()
-                                stopService()
-                                if (id != null) finishTrip(id)
-                            } else {
-                                controller.setPaused(true)
-                            }
-                        }
-                        // Возврат CONNECTED при уже открытой сессии (только на переходе,
-                        // не на каждую emission в CONNECTED — иначе бы тут гонялись с
-                        // watchdog'ом ниже, который пауза/анпауза по lastSnapshotAt).
-                        state == ConnectionState.CONNECTED &&
-                            currentTripId != null &&
-                            lastState != ConnectionState.CONNECTED -> {
-                            controller.setPaused(false)
-                        }
-                        else -> Unit
-                    }
+                    tripMutex.withLock { onConnectionState(state) }
                 } catch (_: Throwable) {
                     // Не валим приложение из-за гонки — попробуем при следующем переходе.
                 }
@@ -118,12 +85,12 @@ class AutoSessionManager @Inject constructor(
             }.launchIn(scope)
         }
 
-        // Watchdog «частичного разрыва»: смотрим на ConnectionStatus.lastSnapshotAt.
-        // Когда CONNECTED, но данные не идут >10 c — пауза. Когда снова пошли — снимаем.
+        // Watchdog «частичного разрыва»: CONNECTED, но данные не идут >10 c — пауза.
+        // GPS-сессию не трогаем: она пишется и без ЭБУ (паузу ей ставит сервис на стоянке).
         scope.launch {
             while (isActive) {
                 delay(2000)
-                if (currentTripId == null) continue
+                if (currentTripId == null || controller.gpsMode.value) continue
                 val s = obdRepo.connectionStatus.value
                 if (s.state != ConnectionState.CONNECTED) continue
                 val now = System.currentTimeMillis()
@@ -137,44 +104,109 @@ class AutoSessionManager @Inject constructor(
             }
         }
 
-        // Watchdog авто-завершения. Сессия в непрерывной паузе дольше ORPHAN_MAX_AGE_MS
-        // (8 ч) → закрываем сами как полноценный finish (а не оставляем «висеть» до
-        // следующего рестарта приложения). Это та же логика что adoption на старте,
-        // только применяется в runtime — чтобы пользователь не вернулся через сутки и
-        // не увидел давно мёртвую сессию активной.
+        // Watchdog авто-завершения: сессия в непрерывной паузе дольше 8 ч закрывается,
+        // чтобы пользователь не вернулся через сутки к давно мёртвой «активной» сессии.
         scope.launch {
             while (isActive) {
                 delay(30_000)
-                val tripId = currentTripId ?: continue
+                if (currentTripId == null) continue
                 val pauseStart = controller.pauseSinceMs.value ?: continue
-                val pausedFor = System.currentTimeMillis() - pauseStart
-                if (pausedFor >= ORPHAN_MAX_AGE_MS) {
-                    runCatching {
-                        currentTripId = null
-                        controller.onTripFinished()
-                        stopService()
-                        finishTrip(tripId)
-                    }
+                if (System.currentTimeMillis() - pauseStart >= ORPHAN_MAX_AGE_MS) {
+                    runCatching { tripMutex.withLock { closeTripLocked() } }
                 }
             }
         }
     }
 
+    /** Ручной старт записи по GPS (кнопка на вкладке «Сессия»). */
+    suspend fun startGpsTrip() = tripMutex.withLock {
+        if (currentTripId != null) return@withLock
+        val profile = vehicleRepo.observeActive().firstOrNull() ?: return@withLock
+        val tripId = startTrip(profile.id)
+        currentTripId = tripId
+        prefs.setGpsTripId(tripId)
+        controller.onTripStarted(tripId, gpsMode = true)
+        startService()
+    }
+
+    /**
+     * «Завершить» на вкладке «Сессия». Закрывает сессию в любом состоянии — и при
+     * подключённом адаптере, и в GPS-режиме, и когда сессия висит на паузе без связи
+     * (раньше в последнем случае кнопка ничего не делала: разрыв, которого ждал
+     * слушатель статуса, уже давно случился). Адаптер отключаем, иначе следующий же
+     * снимок CONNECTED тут же открыл бы новую сессию.
+     */
+    suspend fun finishByUser() {
+        controller.requestFinish()
+        if (obdRepo.connectionStatus.value.state != ConnectionState.DISCONNECTED) {
+            obdRepo.disconnect()
+        }
+        tripMutex.withLock {
+            closeTripLocked()
+            controller.consumeFinishRequest()
+        }
+    }
+
+    private suspend fun onConnectionState(state: ConnectionState) {
+        when {
+            // Переход → CONNECTED: открываем новую сессию (если еще нет открытой).
+            state == ConnectionState.CONNECTED && currentTripId == null -> {
+                val profile = vehicleRepo.observeActive().firstOrNull() ?: return
+                val tripId = startTrip(profile.id)
+                currentTripId = tripId
+                controller.onTripStarted(tripId)
+                startService()
+            }
+            // Переход → DISCONNECTED/ERROR с открытой сессией. Закрываем её ТОЛЬКО по
+            // явному «Завершить»/«Откл.» (флаг в TripController). Иначе это обрыв:
+            // вышли из машины, заглушили двигатель — OBD-сессия встаёт на паузу и
+            // продолжится в ту же запись после переподключения. GPS-сессия пишется дальше.
+            (state == ConnectionState.DISCONNECTED || state == ConnectionState.ERROR) &&
+                currentTripId != null -> {
+                if (controller.consumeFinishRequest()) {
+                    closeTripLocked()
+                } else if (!controller.gpsMode.value) {
+                    controller.setPaused(true)
+                }
+            }
+            // Возврат CONNECTED при уже открытой сессии (только на переходе, не на каждую
+            // emission — иначе гонялись бы с watchdog'ом, который ставит паузу по данным).
+            state == ConnectionState.CONNECTED &&
+                currentTripId != null &&
+                lastState != ConnectionState.CONNECTED -> {
+                controller.setPaused(false)
+            }
+            else -> Unit
+        }
+    }
+
+    /** Закрытие текущей сессии. Вызывать только под [tripMutex]; повторный вызов — no-op. */
+    private suspend fun closeTripLocked() {
+        val id = currentTripId ?: return
+        currentTripId = null
+        controller.onTripFinished()
+        stopService()
+        tracker.detach()
+        prefs.setGpsTripId(null)
+        finishTrip(id)
+    }
+
     /** Усыновление осиротевшей сессии: если в БД есть trip с endTime=null, делаем его
      *  активным в памяти, иначе следующий коннект создаст новый trip и старый зависнет.
-     *  Слишком старый (>24 ч) — закрываем сразу, чтобы не считать сутки простоя «паузой». */
+     *  Слишком старый (> 8 ч) — закрываем сразу, чтобы не считать простой «паузой». */
     private suspend fun adoptOrphanIfAny() {
         val orphan = tripRepo.getActiveTripOnce() ?: return
+        val gpsTripId = prefs.gpsTripId.first()
         val now = System.currentTimeMillis()
         val ageMs = now - orphan.startTime
         if (ageMs > ORPHAN_MAX_AGE_MS) {
             finishTrip(orphan.id)
+            prefs.setGpsTripId(null)
             return
         }
         // Простой между последней записью и текущим моментом — это время, когда
-        // приложение было убито. Записей не было, ECU вероятно не отвечал — поэтому
-        // засчитываем как паузу. Иначе UI покажет 30-минутный «активный» интервал, в
-        // котором на самом деле записано 0 точек.
+        // приложение было убито. Записей не было — засчитываем как паузу, иначе UI
+        // покажет «активный» интервал, в котором на самом деле записано 0 точек.
         val lastReadingTs = tripRepo.lastReadingTimestamp(orphan.id)
         val downtimeMs = lastReadingTs?.let { (now - it).coerceAtLeast(0L) } ?: ageMs
         if (downtimeMs > 1_000L) tripRepo.addPausedMs(orphan.id, downtimeMs)
@@ -184,6 +216,7 @@ class AutoSessionManager @Inject constructor(
             tripId = orphan.id,
             startTime = orphan.startTime,
             pausedMsSoFar = adopted?.pausedMs ?: orphan.pausedMs,
+            gpsMode = orphan.id == gpsTripId,
         )
         startService()
     }

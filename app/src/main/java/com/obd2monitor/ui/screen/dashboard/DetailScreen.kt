@@ -14,28 +14,25 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Warning
-import androidx.compose.material3.Button
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -45,8 +42,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.delay
 import com.obd2monitor.domain.model.MetricCatalog
 import com.obd2monitor.ui.components.LineChart
+import com.obd2monitor.ui.components.ScreenColumn
 import com.obd2monitor.ui.components.StatBox
 import com.obd2monitor.ui.theme.ColorCard
 import com.obd2monitor.ui.theme.ColorNeutral
@@ -60,8 +59,14 @@ fun ParameterDetailScreen(
     viewModel: DashboardViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    // Полная история за сессию (из БД, fallback на in-memory).
-    val series = viewModel.fullHistory(metricKey)
+    // Полная история за сессию: из БД, обновляется раз в несколько секунд, пока
+    // экран открыт (раньше пересчитывалась целиком на каждом новом снимке OBD).
+    val series by produceState(initialValue = state.histories[metricKey]?.values.orEmpty(), metricKey) {
+        while (true) {
+            value = viewModel.sessionSeries(metricKey)
+            delay(5_000)
+        }
+    }
     val info = MetricCatalog.forKey(metricKey, state.activeProfile)
     val current = currentValue(metricKey, state)
     val min = series.minOrNull()
@@ -80,16 +85,10 @@ fun ParameterDetailScreen(
     // resetSelectionKey.
     var chartResetTick by remember { androidx.compose.runtime.mutableIntStateOf(0) }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .verticalScroll(rememberScrollState())
-            .pointerInput(Unit) {
-                detectTapGestures { chartResetTick++ }
-            }
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ScreenColumn(
+        modifier = Modifier.pointerInput(Unit) { detectTapGestures { chartResetTick++ } },
+        bottomPadding = 24.dp,
+        spacing = 14.dp,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) {
@@ -191,9 +190,6 @@ fun ParameterDetailScreen(
             }
         }
 
-        Button(onClick = viewModel::resetSession, modifier = Modifier.fillMaxWidth()) {
-            Text("Сбросить статистику сессии")
-        }
         Spacer(Modifier.height(24.dp))
     }
 }
@@ -218,7 +214,7 @@ private fun currentValue(key: String, state: DashboardUiState): Float? = when (k
     "distclear" -> state.data.distanceSinceClearKm?.toFloat()
     "ambient" -> state.data.ambientTempC?.toFloat()
     "maf" -> state.data.mafGs
-    "power" -> state.data.powerKw?.let { it * 1.35962f }
+    "power" -> state.data.powerKw?.let { it * com.obd2monitor.data.obd.ReadingMetrics.KW_TO_HP }
     "torque" -> state.data.torqueNm
     "vacuum" -> state.data.vacuumKpa
     "warmup" -> state.data.warmupPct

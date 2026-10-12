@@ -1,9 +1,9 @@
 package com.obd2monitor.ui.components
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -13,15 +13,18 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.obd2monitor.domain.model.ConnectionState
 import com.obd2monitor.domain.model.ConnectionStatus
@@ -32,88 +35,79 @@ import com.obd2monitor.ui.theme.ColorSuccess
 import com.obd2monitor.ui.theme.ColorTextSecondary
 import com.obd2monitor.ui.theme.ColorWarning
 
+/** Цвет и подпись состояния подключения — одни и те же на всех экранах. */
+fun connectionLabel(state: ConnectionState): Pair<Color, String> = when (state) {
+    ConnectionState.CONNECTED -> ColorSuccess to "Подключено"
+    ConnectionState.CONNECTING -> ColorWarning to "Подключение"
+    ConnectionState.INITIALIZING -> ColorWarning to "Инициализация"
+    ConnectionState.ERROR -> ColorError to "Нет связи"
+    ConnectionState.DISCONNECTED -> ColorTextSecondary to "Не подключено"
+}
+
+/**
+ * Шапка «Главной»: активный профиль автомобиля, адаптер и протокол, статус связи,
+ * кнопки переподключения и настроек.
+ */
 @Composable
 fun ConnectionBar(
     status: ConnectionStatus,
     activeProfileName: String?,
     onSettingsClick: () -> Unit,
-    onConnectClick: () -> Unit,
     onReconnectClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val (color, label) = when (status.state) {
-        ConnectionState.CONNECTED -> ColorSuccess to "ON-LINE"
-        ConnectionState.CONNECTING -> ColorWarning to "ПОДКЛ…"
-        ConnectionState.INITIALIZING -> ColorWarning to "INIT"
-        ConnectionState.ERROR -> ColorError to "ОШИБКА"
-        ConnectionState.DISCONNECTED -> ColorTextSecondary to "OFF"
-    }
-    // Кнопка переподключения доступна, когда есть сохранённый адрес устройства
-    // (то есть мы уже хоть раз подключались). Это касается и состояния ERROR/OFF —
-    // оттуда тоже хочется быстро дёрнуть «повторить», не идя в настройки.
-    // Во время CONNECTING/INITIALIZING — блокируем, чтобы юзер не отменил активный
-    // handshake серией повторных нажатий.
+    val (color, label) = connectionLabel(status.state)
+    // Переподключение доступно, когда адрес адаптера известен. Во время подключения
+    // и инициализации кнопка неактивна, чтобы повторные нажатия не сбивали handshake.
     val canReconnect = status.deviceAddress != null &&
         status.state != ConnectionState.CONNECTING &&
         status.state != ConnectionState.INITIALIZING
+    val details = when {
+        status.state == ConnectionState.CONNECTED ->
+            listOfNotNull(status.elmVersion?.takeIf { it.isNotBlank() } ?: "ELM327", status.protocol?.displayName)
+                .joinToString(" · ")
+        status.deviceAddress == null -> "Адаптер не подключён"
+        else -> "Адаптер ELM327"
+    }
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(18.dp))
             .background(ColorCard)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
+            .padding(start = 16.dp, end = 4.dp, top = 10.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(
-            imageVector = Icons.Filled.Refresh,
-            contentDescription = "Переподключить",
-            tint = if (canReconnect) ColorNeutral else ColorTextSecondary,
-            modifier = Modifier
-                .size(18.dp)
-                .let { if (canReconnect) it.clickable { onReconnectClick() } else it },
-        )
-        Spacer(Modifier.width(10.dp))
-        Box(
-            Modifier
-                .size(9.dp)
-                .clip(CircleShape)
-                .background(color),
-        )
-        Spacer(Modifier.width(8.dp))
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelMedium,
-            color = color,
-        )
-        Spacer(Modifier.width(10.dp))
-        Text(
-            status.elmVersion?.takeIf { it.isNotBlank() } ?: "ELM327",
-            style = MaterialTheme.typography.bodySmall,
-            color = ColorTextSecondary,
-        )
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 8.dp),
-            horizontalArrangement = Arrangement.End,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (activeProfileName != null) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                activeProfileName ?: "Профиль автомобиля не выбран",
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(8.dp).clip(CircleShape).background(color))
+                Spacer(Modifier.width(6.dp))
+                Text(label, style = MaterialTheme.typography.labelMedium, color = color)
                 Text(
-                    activeProfileName,
+                    "  ·  $details",
                     style = MaterialTheme.typography.bodySmall,
-                    color = ColorNeutral,
-                    modifier = Modifier
-                        .clickable { onConnectClick() }
-                        .padding(end = 8.dp),
+                    color = ColorTextSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
-            Icon(
-                imageVector = Icons.Filled.Settings,
-                contentDescription = null,
-                tint = ColorTextSecondary,
-                modifier = Modifier.clickable { onSettingsClick() },
-            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
+            IconButton(onClick = onReconnectClick, enabled = canReconnect) {
+                Icon(
+                    Icons.Outlined.Refresh,
+                    contentDescription = "Переподключить",
+                    tint = if (canReconnect) ColorNeutral else ColorTextSecondary.copy(alpha = 0.4f),
+                )
+            }
+            IconButton(onClick = onSettingsClick) {
+                Icon(Icons.Outlined.Settings, contentDescription = "Настройки", tint = ColorTextSecondary)
+            }
         }
     }
 }

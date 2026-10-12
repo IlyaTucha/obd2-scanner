@@ -34,31 +34,38 @@ class OBDApplication : Application() {
         appScope.launch { Seeder.seedIfEmpty(db) }
         // Авто-сессии: подписываемся на состояние подключения OBD и открываем/закрываем сессию автоматически.
         autoSession.start()
-        // Бэкап БД на каждый запуск — страховка от случайной destructive-миграции
-        // и от собственных ошибок при правке схемы. Хранится в app-external
-        // (Android/data/<pkg>/files/db_backups), пользователь может вытащить через
-        // файловый менеджер. Без runtime-permission, работает на Android 8+.
+        // Ежедневный бэкап БД — страховка от неудачной миграции и ошибок при правке
+        // схемы. Хранится в Android/data/<pkg>/files/db_backups, его можно забрать
+        // файловым менеджером или по USB. Разрешений не требует.
         appScope.launch { backupDatabase() }
     }
 
-    /** Копируем obd2_monitor.db + -wal/-shm в внешнюю папку app, оставляем последние
-     *  MAX_BACKUPS файлов. Безопасно вызывать даже когда Room ещё открывает БД —
-     *  SQLite допускает чтение файла во время работы (WAL mode). Если копирование
-     *  упало — глотаем (бэкап best-effort, не должен валить старт app). */
+    /**
+     * Копия obd2_monitor.db во внешнюю папку приложения, не чаще раза в сутки;
+     * хранятся последние MAX_BACKUPS копий (то есть за последние дни, а не за
+     * последние запуски — раньше десять перезапусков за вечер вытесняли все
+     * вчерашние копии). Перед копированием журнал WAL вливается в основной файл:
+     * без этого последние записи оставались в -wal и в копию не попадали.
+     * Ошибки глотаем — бэкап best-effort и не должен ломать запуск.
+     */
     private fun backupDatabase() {
         runCatching {
             val src = getDatabasePath(AppDatabase.NAME) ?: return
             if (!src.exists() || src.length() == 0L) return
             val dir = File(getExternalFilesDir(null), "db_backups").apply { mkdirs() }
-            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-            File(dir, "obd2_monitor_$stamp.db").also { dst ->
-                src.copyTo(dst, overwrite = true)
-            }
-            // Ротация — оставляем последние MAX_BACKUPS, чтобы папка не пухла.
             val backups = dir.listFiles { f -> f.name.startsWith("obd2_monitor_") && f.name.endsWith(".db") }
                 ?.sortedByDescending { it.lastModified() }
                 .orEmpty()
-            backups.drop(MAX_BACKUPS).forEach { runCatching { it.delete() } }
+            val today = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
+            if (backups.any { it.name.startsWith("obd2_monitor_$today") }) return
+            runCatching {
+                db.openHelper.writableDatabase.query("PRAGMA wal_checkpoint(FULL)").use { it.moveToFirst() }
+            }
+            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            src.copyTo(File(dir, "obd2_monitor_$stamp.db"), overwrite = true)
+            (listOf(File(dir, "obd2_monitor_$stamp.db")) + backups)
+                .drop(MAX_BACKUPS)
+                .forEach { runCatching { it.delete() } }
         }
     }
 

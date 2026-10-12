@@ -5,20 +5,17 @@ import com.obd2monitor.data.database.VehicleProfileDao
 import com.obd2monitor.data.database.toDomain
 import com.obd2monitor.data.database.toEntity
 import com.obd2monitor.data.obd.FuelCalculator
-import com.obd2monitor.domain.model.FuelType
+import com.obd2monitor.data.obd.ReadingMetrics
+import com.obd2monitor.data.obd.TripMath
 import com.obd2monitor.domain.model.OBDReading
 import com.obd2monitor.domain.model.Trip
-import com.obd2monitor.domain.model.VehicleProfile
 import com.obd2monitor.domain.repository.TripRepository
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlin.math.acos
-import kotlin.math.cos
 import kotlin.math.max
-import kotlin.math.sin
 
 @Singleton
 class TripRepositoryImpl @Inject constructor(
@@ -63,37 +60,36 @@ class TripRepositoryImpl @Inject constructor(
 
     override suspend fun finishTrip(tripId: String) {
         val current = dao.getById(tripId) ?: return
-        val readings = dao.readingsFor(tripId)
+        val readings = dao.readingsFor(tripId).map { it.toDomain() }
         val profile = vehicleDao.getById(current.vehicleProfileId)?.toDomain()
         if (readings.isEmpty()) {
             dao.update(current.copy(endTime = System.currentTimeMillis()))
             return
         }
-        // Расстояние: интегрируем скорость * dt
-        var distance = 0f
+        // Расстояние: интегрируем скорость × dt; разрывы записи (паузы) не считаем ездой.
+        val distance = TripMath.distanceKm(readings)
         var maxSpeed = 0f
         var maxRpm = 0
         var maxCoolant = 0
-        for (i in 1 until readings.size) {
-            val dtH = (readings[i].timestamp - readings[i - 1].timestamp) / 3600000f
-            val avgSpd = (readings[i].speedKmh + readings[i - 1].speedKmh) / 2f
-            distance += avgSpd * dtH
-            maxSpeed = max(maxSpeed, readings[i].speedKmh)
-            maxRpm = max(maxRpm, readings[i].rpm.toInt())
-            maxCoolant = max(maxCoolant, readings[i].coolantTempC.toInt())
+        for (r in readings) {
+            maxSpeed = max(maxSpeed, r.speedKmh)
+            maxRpm = max(maxRpm, r.rpm.toInt())
+            maxCoolant = max(maxCoolant, r.coolantTempC.toInt())
         }
         val totalLiters = FuelCalculator.integrateTotalLiters(
-            timestamps = readings.map { it.timestamp }.toLongArray(),
-            consumptionLPer100 = readings.map { it.instantFuelLPer100 }.toFloatArray(),
-            speedsKmh = readings.map { it.speedKmh }.toFloatArray(),
-            fuelRateLPerHour = readings.map { fuelRateLhOf(it.toDomain(), profile) }.toFloatArray(),
+            timestamps = LongArray(readings.size) { readings[it].timestamp },
+            consumptionLPer100 = FloatArray(readings.size) { readings[it].instantFuelLPer100 },
+            speedsKmh = FloatArray(readings.size) { readings[it].speedKmh },
+            fuelRateLPerHour = FloatArray(readings.size) { ReadingMetrics.fuelRateLh(readings[it], profile) },
         )
-        val durationH = (System.currentTimeMillis() - current.startTime) / 3600000f
-        val avgSpeed = if (durationH > 0f) distance / durationH else 0f
+        val now = System.currentTimeMillis()
+        // Средняя — по времени в пути (без пауз), как и плитка «В пути» в отчёте.
+        val activeH = ((now - current.startTime - current.pausedMs).coerceAtLeast(0L)) / 3_600_000f
+        val avgSpeed = if (activeH > 0f) distance / activeH else 0f
         val avgCons = if (distance > 0.05f) totalLiters / distance * 100f else 0f
         dao.update(
             current.copy(
-                endTime = System.currentTimeMillis(),
+                endTime = now,
                 distanceKm = distance,
                 avgSpeedKmh = avgSpeed,
                 maxSpeedKmh = maxSpeed,
@@ -112,32 +108,4 @@ class TripRepositoryImpl @Inject constructor(
 
     override suspend fun readingsFor(tripId: String): List<OBDReading> =
         dao.readingsFor(tripId).map { it.toDomain() }
-
-    override fun observeReadings(tripId: String) =
-        dao.observeReadings(tripId).map { list -> list.map { it.toDomain() } }
-
-    /** Гаверсинус — расстояние между двумя GPS-точками в км. Не используется напрямую тут, но полезно. */
-    @Suppress("unused")
-    private fun haversine(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Float {
-        val R = 6371.0
-        val dLat = Math.toRadians(lat2 - lat1)
-        val dLon = Math.toRadians(lon2 - lon1)
-        val a = sin(dLat / 2) * sin(dLat / 2) +
-                cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) *
-                sin(dLon / 2) * sin(dLon / 2)
-        val c = 2 * acos((1 - 2 * a).coerceIn(-1.0, 1.0)) / 2
-        return (R * c).toFloat()
-    }
-
-    private fun fuelRateLhOf(reading: OBDReading, profile: VehicleProfile?): Float {
-        val fuel = profile?.fuelType ?: FuelType.PETROL
-        val displacementL = profile?.displacementL ?: 1.5f
-        return when {
-            reading.mafGs > 0f -> FuelCalculator.fromMAF(reading.mafGs, fuel)
-            reading.mapKpa > 0f && reading.rpm > 0f && reading.intakeTempC != 0f ->
-                FuelCalculator.fromMAP(reading.mapKpa, reading.rpm, reading.intakeTempC, displacementL, fuel)
-            reading.rpm > 0f -> FuelCalculator.estimateIdleLitersPerHour(displacementL, reading.rpm)
-            else -> 0f
-        }
-    }
 }

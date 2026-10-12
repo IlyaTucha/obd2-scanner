@@ -1,6 +1,7 @@
 package com.obd2monitor.data.bluetooth
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager as AndroidBtManager
@@ -48,9 +49,14 @@ class BluetoothObdConnection @Inject constructor(
     fun adapter(): BluetoothAdapter? = adapter
 
     /** Список спаренных устройств. Требует BLUETOOTH_CONNECT (S+). */
+    @SuppressLint("MissingPermission") // разрешение проверено выше, отзыв на лету ловим ниже
     fun pairedDevices(): List<BluetoothDevice> {
         if (!hasConnectPermission()) return emptyList()
-        return adapter?.bondedDevices?.toList().orEmpty()
+        return try {
+            adapter?.bondedDevices?.toList().orEmpty()
+        } catch (_: SecurityException) {
+            emptyList()
+        }
     }
 
     private fun hasConnectPermission(): Boolean {
@@ -62,9 +68,9 @@ class BluetoothObdConnection @Inject constructor(
 
     @Throws(SecurityException::class, IOException::class)
     suspend fun connect(deviceAddress: String) = withContext(Dispatchers.IO) {
-        val a = adapter ?: throw IOException("Bluetooth adapter недоступен")
-        if (!a.isEnabled) throw IOException("Bluetooth выключен")
-        if (!hasConnectPermission()) throw SecurityException("Нет разрешения BLUETOOTH_CONNECT")
+        val a = adapter ?: throw IOException("Bluetooth недоступен на этом устройстве")
+        if (!a.isEnabled) throw IOException("Bluetooth выключен — включите его в настройках телефона")
+        if (!hasConnectPermission()) throw SecurityException("Нет разрешения на подключение к Bluetooth-устройствам")
         a.cancelDiscovery()
         val device = a.getRemoteDevice(deviceAddress)
         // Создаём insecure RFCOMM сокет — ELM327 редко требует pairing-key.

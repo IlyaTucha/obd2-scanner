@@ -22,6 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.obd2monitor.ui.theme.ColorCardGray
 import com.obd2monitor.ui.theme.ColorNeutral
@@ -29,8 +30,7 @@ import com.obd2monitor.ui.theme.ColorTextPrimary
 import com.obd2monitor.ui.theme.ColorTextSecondary
 
 /**
- * Карточка параметра: иконка, название, значение, sparkline.
- * Плоский серый фон, без градиента (см. правки UX).
+ * Карточка параметра: иконка, название, значение и мини-график за последние минуты.
  */
 @Composable
 fun DataCard(
@@ -38,10 +38,10 @@ fun DataCard(
     title: String,
     value: String,
     unit: String,
+    modifier: Modifier = Modifier,
     history: List<Float> = emptyList(),
     valueColor: Color = ColorTextPrimary,
     accent: Color = ColorNeutral,
-    modifier: Modifier = Modifier,
     onClick: () -> Unit = {},
 ) {
     Column(
@@ -50,15 +50,15 @@ fun DataCard(
             .clip(RoundedCornerShape(18.dp))
             .background(ColorCardGray)
             .clickable(onClick = onClick)
-            .padding(14.dp),
+            .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.SpaceBetween,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
                 imageVector = icon,
-                contentDescription = title,
+                contentDescription = null,
                 tint = accent,
-                modifier = Modifier.size(20.dp),
+                modifier = Modifier.size(18.dp),
             )
             Spacer(Modifier.width(8.dp))
             Text(
@@ -66,17 +66,28 @@ fun DataCard(
                 style = MaterialTheme.typography.labelMedium,
                 color = ColorTextSecondary,
                 maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
             )
         }
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.Bottom) {
-            Text(value, style = MaterialTheme.typography.headlineLarge, color = valueColor)
-            Spacer(Modifier.width(6.dp))
-            Text(unit, style = MaterialTheme.typography.labelSmall, color = ColorTextSecondary)
+            Text(value, style = MaterialTheme.typography.headlineMedium, color = valueColor, maxLines = 1)
+            if (unit.isNotEmpty()) {
+                Spacer(Modifier.width(5.dp))
+                Text(
+                    unit,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = ColorTextSecondary,
+                    modifier = Modifier.padding(bottom = 3.dp),
+                )
+            }
         }
         if (history.size > 1) {
             Spacer(Modifier.height(6.dp))
-            SparklineChart(values = history, color = accent.copy(alpha = 0.7f), modifier = Modifier.fillMaxWidth())
+            SparklineChart(values = history.takeLast(SPARKLINE_POINTS), color = accent.copy(alpha = 0.7f), modifier = Modifier.fillMaxWidth())
         }
     }
 }
+
+/** Сколько последних значений рисует мини-график карточки. */
+private const val SPARKLINE_POINTS = 240

@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -22,6 +23,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -52,6 +54,7 @@ fun GaugeWidget(
     icon: ImageVector? = null,
     onClick: (() -> Unit)? = null,
 ) {
+    val maxDial = minOf(190.dp, (LocalConfiguration.current.screenHeightDp * 0.32f).dp)
     val clamped = value.coerceIn(minValue, maxValue)
     val fraction = if (maxValue - minValue > 0f) (clamped - minValue) / (maxValue - minValue) else 0f
     val animFraction by animateFloatAsState(targetValue = fraction, label = "gauge")
@@ -74,11 +77,13 @@ fun GaugeWidget(
                 )
                 Spacer(Modifier.width(4.dp))
             }
-            Text(label, style = MaterialTheme.typography.labelMedium, color = ColorTextSecondary)
+            Text(label, style = MaterialTheme.typography.labelMedium, color = ColorTextSecondary, maxLines = 1)
         }
         // Сам тахометр: квадрат с дугой и числом по центру.
         Box(
-            modifier = Modifier.fillMaxWidth().aspectRatio(1f),
+            // В горизонтали колонка широкая, а экран низкий — прибор ограничен и по
+            // ширине, и по трети высоты экрана, чтобы под ним были видны карточки.
+            modifier = Modifier.widthIn(max = maxDial).fillMaxWidth().aspectRatio(1f),
             contentAlignment = Alignment.Center,
         ) {
             // Равномерный padding со всех сторон → дуга остаётся круглой (не овалом).

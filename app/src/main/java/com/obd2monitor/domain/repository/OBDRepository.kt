@@ -1,7 +1,7 @@
 package com.obd2monitor.domain.repository
 
 import com.obd2monitor.domain.model.ConnectionStatus
-import com.obd2monitor.domain.model.DTCCode
+import com.obd2monitor.domain.model.DtcScanResult
 import com.obd2monitor.domain.model.EcuInfo
 import com.obd2monitor.domain.model.OBDData
 import kotlinx.coroutines.flow.Flow
@@ -21,10 +21,11 @@ interface OBDRepository {
      * а только ставит на паузу на время реинициализации.
      */
     suspend fun reconnect()
-    suspend fun setPollInterval(intervalMs: Long)
 
-    suspend fun readDTC(): List<DTCCode>
+    /** Чтение ошибок (Mode 03/07/0A), статуса Check Engine и стоп-кадра.
+     *  Бросает исключение, если адаптер не подключён или ЭБУ не ответил. */
+    suspend fun scanDtc(): DtcScanResult
+    /** Сброс ошибок (Mode 04). true — блок подтвердил сброс. */
     suspend fun clearDTC(): Boolean
-    suspend fun supportedPids(): List<String>
     suspend fun readEcuInfo(): EcuInfo
 }

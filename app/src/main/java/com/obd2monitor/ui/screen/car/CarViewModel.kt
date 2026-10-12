@@ -111,35 +111,6 @@ class CarViewModel @Inject constructor(
         maintenanceFlow.onEach { _state.value = _state.value.copy(maintenance = it) }.launchIn(viewModelScope)
     }
 
-    fun saveVehicleInfo(vin: String, licensePlate: String) {
-        val profile = _state.value.profile ?: return
-        // Если в стейте есть последний успешный decode и VIN совпадает — применяем
-        // расшифрованные поля поверх профиля (марка/модель/год/двигатель/топливо).
-        // Это даёт пользователю «нажал Определить → нажал Сохранить» — и профиль
-        // уже сам обновился, без ручного переключения пресетов.
-        val decoded = (_state.value.vinDecode as? VinDecodeUiState.Done)?.result
-        val cleanedVin = vin.trim().uppercase()
-        val merged = if (decoded != null && decoded.vin == cleanedVin) {
-            profile.copy(
-                vin = cleanedVin,
-                licensePlate = licensePlate.trim(),
-                make = decoded.make ?: profile.make,
-                model = decoded.model ?: profile.model,
-                year = decoded.year ?: profile.year,
-                engineType = decoded.engineType ?: profile.engineType,
-                displacementL = decoded.displacementL ?: profile.displacementL,
-                fuelType = decoded.fuelType ?: profile.fuelType,
-                maxPowerKw = decoded.maxPowerKw ?: profile.maxPowerKw,
-            )
-        } else {
-            profile.copy(vin = cleanedVin, licensePlate = licensePlate.trim())
-        }
-        viewModelScope.launch {
-            vehicleRepo.upsert(merged)
-            _state.value = _state.value.copy(vinDecode = VinDecodeUiState.Idle)
-        }
-    }
-
     /**
      * Расшифровка VIN. Сначала пробует онлайн NHTSA vPIC API, fallback — локальный
      * парсинг 10-го символа (год) и WMI (производитель). Результат кладётся в

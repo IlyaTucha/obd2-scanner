@@ -30,7 +30,6 @@ class DTCRepositoryImpl @Inject constructor(
     )
 
     private fun fallback(code: String): DTCCode {
-        exactFallback[code]?.let { return it }
         standardFallback(code)?.let { return it }
         return DTCCode(
             code = code,
@@ -41,7 +40,7 @@ class DTCRepositoryImpl @Inject constructor(
                 'U' -> "Код сетевой неисправности $code. Обычно связан с обменом по CAN/LIN или потерей связи с модулем."
                 else -> "Описание кода $code недоступно."
             },
-            possibleCauses = listOf("Производитель-специфичный код", "Код сохранён в отдельном блоке управления", "Нужна расшифровка по марке и модели"),
+            possibleCauses = listOf("Код производителя", "Код сохранён в отдельном блоке управления", "Нужна расшифровка по марке и модели"),
             recommendedActions = listOf("Повторить сканирование", "Считать ошибки всех блоков специализированным сканером", "Сверить код с сервисной документацией производителя"),
         )
     }
@@ -49,7 +48,7 @@ class DTCRepositoryImpl @Inject constructor(
     private fun standardFallback(code: String): DTCCode? {
         val prefix = code.firstOrNull() ?: return null
         val number = code.drop(1).toIntOrNull() ?: return null
-        val isManufacturerSpecific = code.getOrNull(1)?.let { it == '1' || it == '3' } == true
+        val isManufacturerSpecific = DTCCode.isManufacturerSpecific(code)
         return when (prefix) {
             'P' -> powertrainFallback(code, number, isManufacturerSpecific)
             'C' -> chassisFallback(code, number, isManufacturerSpecific)
@@ -85,9 +84,9 @@ class DTCRepositoryImpl @Inject constructor(
         }
         return DTCCode(
             code = code,
-            description = "${if (manufacturer) "Производитель-специфичный" else "Стандартный"} код силового агрегата $code: $area.",
+            description = "${if (manufacturer) "Код производителя" else "Стандартный код"} $code, точного описания в справочнике нет. Область: $area.",
             possibleCauses = listOf("Неисправность датчика или исполнительного механизма", "Проводка, разъём, питание или масса", "Механическая неисправность связанной системы", "Ошибка сохранена как следствие другой первичной ошибки"),
-            recommendedActions = listOf("Считать freeze-frame и связанные DTC", "Проверить питание, массу и разъёмы", "Сравнить live-параметры с нормой", "Уточнить точную расшифровку по марке и двигателю"),
+            recommendedActions = listOf("Посмотреть стоп-кадр и другие коды", "Проверить питание, массу и разъёмы", "Сравнить текущие показания с нормой", "Уточнить точную расшифровку по марке и двигателю"),
             isCritical = number in 300..399 || number in 600..699,
         )
     }
@@ -103,7 +102,7 @@ class DTCRepositoryImpl @Inject constructor(
         }
         return DTCCode(
             code = code,
-            description = "${if (manufacturer) "Производитель-специфичный" else "Стандартный"} код шасси $code: $area.",
+            description = "${if (manufacturer) "Код производителя" else "Стандартный код"} шасси $code, точного описания в справочнике нет. Область: $area.",
             possibleCauses = listOf("Датчик колеса/ABS/ESP или исполнительный механизм", "Обрыв, КЗ или окисление разъёма", "Низкое напряжение питания блока", "Механическая проблема узла шасси"),
             recommendedActions = listOf("Считать ошибки блока ABS/ESP/4WD", "Проверить датчики и проводку на колёсах", "Проверить питание и массу блока", "Сверить код с документацией производителя"),
         )
@@ -119,7 +118,7 @@ class DTCRepositoryImpl @Inject constructor(
         }
         return DTCCode(
             code = code,
-            description = "${if (manufacturer) "Производитель-специфичный" else "Стандартный"} код кузовной электроники $code: $area.",
+            description = "${if (manufacturer) "Код производителя" else "Стандартный код"} кузовной электроники $code, точного описания в справочнике нет. Область: $area.",
             possibleCauses = listOf("Неисправность датчика/актуатора кузовной системы", "Проводка или разъёмы", "Сбой BCM/SRS/климатического блока", "Низкое напряжение АКБ"),
             recommendedActions = listOf("Считать ошибки конкретного кузовного блока", "Проверить разъёмы и питание", "Не сбрасывать SRS без диагностики причины", "Уточнить код по марке автомобиля"),
         )
@@ -135,37 +134,9 @@ class DTCRepositoryImpl @Inject constructor(
         }
         return DTCCode(
             code = code,
-            description = "${if (manufacturer) "Производитель-специфичный" else "Стандартный"} сетевой код $code: $area.",
+            description = "${if (manufacturer) "Код производителя" else "Стандартный"} сетевой код $code, точного описания в справочнике нет. Область: $area.",
             possibleCauses = listOf("Потеря питания или массы одного из блоков", "Обрыв/КЗ CAN или LIN", "Слабый аккумулятор", "Блок не выходит на связь или был отключён"),
             recommendedActions = listOf("Проверить напряжение АКБ", "Считать ошибки всех блоков", "Проверить питание/массу модуля, указанного кодом", "Проверить CAN/LIN проводку при повторении ошибки"),
         )
     }
-
-    private val exactFallback = mapOf(
-        "P0444" to DTCCode(
-            code = "P0444",
-            description = "EVAP — обрыв цепи клапана продувки адсорбера",
-            possibleCauses = listOf("Обрыв проводки клапана продувки", "Плохой контакт в разъёме", "Неисправный клапан продувки адсорбера", "Неисправность драйвера ECU"),
-            recommendedActions = listOf("Проверить разъём и проводку клапана EVAP", "Проверить сопротивление клапана", "Проверить питание и управляющий сигнал", "Заменить клапан при подтверждении неисправности"),
-        ),
-        "P2301" to DTCCode(
-            code = "P2301",
-            description = "Катушка зажигания A — высокий уровень в первичной цепи управления",
-            possibleCauses = listOf("Обрыв или КЗ проводки катушки", "Неисправная катушка зажигания", "Плохой контакт разъёма", "Неисправность драйвера зажигания ECU"),
-            recommendedActions = listOf("Проверить катушку A и её разъём", "Проверить питание и массу", "Поменять катушку местами для проверки", "Проверить управляющий сигнал осциллографом"),
-            isCritical = true,
-        ),
-        "P3400" to DTCCode(
-            code = "P3400",
-            description = "Система отключения цилиндров, банк 1 — неисправность",
-            possibleCauses = listOf("Низкий уровень или давление масла", "Неисправный соленоид отключения цилиндров", "Засор масляных каналов", "Неисправность проводки или ECM"),
-            recommendedActions = listOf("Проверить уровень и качество масла", "Проверить давление масла", "Проверить соленоиды отключения цилиндров", "Проверить проводку и разъёмы"),
-        ),
-        "C0316" to DTCCode(
-            code = "C0316",
-            description = "Производитель-специфичный код шасси C0316",
-            possibleCauses = listOf("Неисправность в системе ABS/ESP/4WD или раздаточной коробке", "Неисправность датчика/исполнительного механизма шасси", "Плохой контакт или обрыв проводки", "Код зависит от производителя"),
-            recommendedActions = listOf("Считать ошибки блока ABS/ESP/4WD специализированным сканером", "Проверить питание, массу и разъёмы соответствующего блока", "Сверить C0316 с документацией конкретной марки"),
-        ),
-    )
 }

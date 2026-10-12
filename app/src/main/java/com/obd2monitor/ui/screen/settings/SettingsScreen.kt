@@ -57,6 +57,7 @@ import com.obd2monitor.domain.model.ConnectionState
 import com.obd2monitor.domain.model.EcuInfo
 import com.obd2monitor.domain.model.VehicleProfile
 import com.obd2monitor.ui.components.ConnectionDiagnostics
+import com.obd2monitor.ui.components.ScreenColumn
 import com.obd2monitor.ui.screen.car.CarSection
 import com.obd2monitor.ui.screen.car.mutedTextFieldColors
 import com.obd2monitor.ui.theme.ColorCard
@@ -87,18 +88,18 @@ fun SettingsScreen(
     var connectionExpanded by remember { mutableStateOf(false) }
     var profilesExpanded by remember { mutableStateOf(false) }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .verticalScroll(rememberScrollState())
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        // Авто-подключение в самом верху — это самая частая настройка, которую
-        // юзер хочет переключить (например, временно отключить, чтобы дебажить).
+    ScreenColumn {
+        Text("Настройки", style = MaterialTheme.typography.headlineSmall)
+        // Авто-подключение в самом верху — самая частая настройка.
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Авто-подключение", modifier = Modifier.weight(1f))
+            Column(Modifier.weight(1f)) {
+                Text("Подключаться автоматически", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    "При запуске приложения — к последнему адаптеру",
+                    color = ColorTextSecondary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
             Switch(checked = state.autoConnect, onCheckedChange = viewModel::setAutoConnect)
         }
 
@@ -119,7 +120,7 @@ fun SettingsScreen(
                 },
                 connectingStage = when (conn.state) {
                     ConnectionState.CONNECTING -> "Подключение…"
-                    ConnectionState.INITIALIZING -> "Инициализация ECU…"
+                    ConnectionState.INITIALIZING -> "Связь с блоком управления…"
                     else -> null
                 },
                 currentAddress = conn.deviceAddress,
@@ -131,7 +132,7 @@ fun SettingsScreen(
         }
 
         if (isConnected) {
-            SectionTitle("Электронный блок управления (ЭБУ)")
+            SectionTitle("Блок управления двигателем")
             EcuSection(
                 info = state.ecuInfo,
                 loading = state.ecuLoading,
@@ -171,8 +172,6 @@ fun SettingsScreen(
             showMenu = showBackupMenu,
             onDismissMenu = onDismissBackupMenu,
         )
-
-        Spacer(Modifier.height(96.dp))
     }
 }
 
@@ -205,12 +204,13 @@ private fun BackupMenuHost(
         AlertDialog(
             onDismissRequest = onDismissMenu,
             containerColor = com.obd2monitor.ui.theme.ColorDialogScrim,
-            title = { Text("Резервная копия БД") },
+            title = { Text("Резервная копия данных") },
             text = {
                 Text(
-                    "Полная копия всех данных: поездки, профили автомобилей, пробег, " +
-                        "расходы, ТО, справочник ошибок. Формат — SQLite (.db). " +
-                        "После импорта приложение перезапустится, текущая БД будет заменена.",
+                    "Полная копия всех данных: сессии, профили автомобилей, пробег, " +
+                        "расходы и обслуживание. Формат — файл базы SQLite (.db). " +
+                        "При восстановлении текущие данные заменяются данными из файла, " +
+                        "после чего приложение перезапускается.",
                 )
             },
             confirmButton = {
@@ -218,13 +218,13 @@ private fun BackupMenuHost(
                     onDismissMenu()
                     val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
                     exportLauncher.launch("obd2_monitor_full_$stamp.db")
-                }) { Text("Экспорт всего") }
+                }) { Text("Сохранить копию") }
             },
             dismissButton = {
                 TextButton(onClick = {
                     onDismissMenu()
                     importLauncher.launch(arrayOf("*/*"))
-                }) { Text("Импорт всего") }
+                }) { Text("Восстановить") }
             },
         )
     }
@@ -236,13 +236,12 @@ private fun BackupMenuHost(
         AlertDialog(
             onDismissRequest = { pendingFullImport = null },
             containerColor = com.obd2monitor.ui.theme.ColorDialogScrim,
-            title = { Text("Перезаписать всю БД?") },
+            title = { Text("Восстановить данные из файла?") },
             text = {
                 Text(
-                    "Текущая БД будет полностью заменена выбранным файлом. " +
-                        "Поездки, профили машин, пробег, расходы и ТО — всё, что было " +
-                        "после даты бэкапа, пропадёт безвозвратно. " +
-                        "Приложение перезапустится сразу после импорта.",
+                    "Текущие данные будут заменены данными из выбранного файла. " +
+                        "Всё, что было добавлено после создания этой копии, будет потеряно. " +
+                        "Приложение перезапустится сразу после восстановления.",
                 )
             },
             confirmButton = {
@@ -250,7 +249,7 @@ private fun BackupMenuHost(
                     val u = uri
                     pendingFullImport = null
                     viewModel.importFullDatabase(u)
-                }) { Text("Да, перезаписать") }
+                }) { Text("Восстановить") }
             },
             dismissButton = {
                 TextButton(onClick = { pendingFullImport = null }) { Text("Отмена") }
@@ -330,7 +329,7 @@ private fun ConnectionBody(
                 style = MaterialTheme.typography.bodyMedium,
             )
             if (isConnected) {
-                OutlinedButton(onClick = onDisconnect) { Text("Откл.") }
+                OutlinedButton(onClick = onDisconnect) { Text("Отключить") }
             } else {
                 OutlinedButton(onClick = onRefresh) { Text("Обновить") }
             }
@@ -340,7 +339,7 @@ private fun ConnectionBody(
         if (devices.isEmpty()) {
             Spacer(Modifier.height(8.dp))
             Text(
-                "Нет спаренных устройств. Спарьте ELM327 в системных настройках.",
+                "Сопряжённых устройств нет. Выполните сопряжение адаптера в настройках Bluetooth телефона и нажмите «Обновить».",
                 color = ColorTextSecondary,
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -407,21 +406,21 @@ private fun EcuSection(info: EcuInfo?, loading: Boolean, onRefresh: () -> Unit) 
     ) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             if (info == null && loading) {
-                Text("Чтение паспорта ECU…", color = ColorTextSecondary)
+                Text("Чтение данных блока управления…", color = ColorTextSecondary)
             } else if (info == null) {
                 Text(
-                    "Не удалось получить данные ECU. Mode 09 поддерживается не всеми ECU " +
-                        "(на старых Hyundai Accent ISO 9141-2 VIN может не отдаваться).",
+                    "Не удалось получить данные блока управления. Запрос паспорта (Mode 09) " +
+                        "поддерживают не все блоки — на многих автомобилях до 2008 года VIN не передаётся.",
                     color = ColorTextSecondary,
                     style = MaterialTheme.typography.bodySmall,
                 )
                 OutlinedButton(onClick = onRefresh) { Text("Повторить") }
             } else {
-                EcuRow("VIN", info.vin ?: "не отдается ECU")
-                EcuRow("ECU", info.ecuName ?: "не отдается ECU")
-                EcuRow("Прошивка ECU", info.calibrationId ?: "не отдается ECU")
+                EcuRow("VIN", info.vin ?: "не передаётся")
+                EcuRow("Блок управления", info.ecuName ?: "не передаётся")
+                EcuRow("Калибровка", info.calibrationId ?: "не передаётся")
                 EcuRow("Протокол", info.protocol?.displayName ?: "—")
-                EcuRow("Адаптер ELM327", info.elmVersion ?: "—")
+                EcuRow("Адаптер", info.elmVersion ?: "—")
                 EcuRow(
                     "Поддерживаемых PID",
                     if (info.supportedPids.isEmpty()) "—"
@@ -429,7 +428,7 @@ private fun EcuSection(info: EcuInfo?, loading: Boolean, onRefresh: () -> Unit) 
                 )
                 Spacer(Modifier.height(4.dp))
                 OutlinedButton(onClick = onRefresh) {
-                    Text(if (loading) "Обновляю…" else "Обновить")
+                    Text(if (loading) "Обновление…" else "Обновить")
                 }
             }
         }
@@ -506,7 +505,7 @@ private fun FuelPriceSection(currentRub: Float, onSave: (Float) -> Unit) {
     ) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
-                "Цена за литр в активном профиле. Используется для расчёта стоимости поездки и цены за 100 км на дашборде.",
+                "Цена литра топлива для активного профиля. По ней считаются стоимость сессии и цена 100 км на «Главной».",
                 color = ColorTextSecondary,
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -551,7 +550,7 @@ private fun FuelPriceSection(currentRub: Float, onSave: (Float) -> Unit) {
                 )
             } else {
                 Text(
-                    "Сейчас не задано — карточки стоимости на дашборде скрыты.",
+                    "Цена не задана — карточки стоимости на «Главной» скрыты.",
                     color = ColorTextSecondary,
                     style = MaterialTheme.typography.labelSmall,
                 )

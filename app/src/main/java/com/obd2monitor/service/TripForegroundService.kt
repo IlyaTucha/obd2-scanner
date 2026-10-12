@@ -17,6 +17,8 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.obd2monitor.MainActivity
 import com.obd2monitor.R
+import com.obd2monitor.data.obd.TripMath
+import com.obd2monitor.domain.model.ConnectionState
 import com.obd2monitor.domain.model.OBDData
 import com.obd2monitor.domain.model.OBDReading
 import com.obd2monitor.domain.repository.OBDRepository
@@ -60,6 +62,7 @@ class TripForegroundService : Service() {
     @Inject lateinit var tripRepo: TripRepository
     @Inject lateinit var obdRepo: OBDRepository
     @Inject lateinit var controller: TripController
+    @Inject lateinit var tracker: ActiveTripTracker
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var writerJob: Job? = null
@@ -68,6 +71,13 @@ class TripForegroundService : Service() {
     private var fusedClient: FusedLocationProviderClient? = null
     private val latestObd = MutableStateFlow(OBDData())
     private var lastLocation: Location? = null
+    /** Скорость по последнему точному фиксу, км/ч, и момент фикса. Нужна GPS-сессиям
+     *  и машинам, чей ЭБУ не отдаёт PID скорости. */
+    @Volatile private var gpsSpeedKmh = 0f
+    @Volatile private var gpsSpeedAt = 0L
+    private var prevFix: Location? = null
+    /** С какого момента GPS-сессия стоит на месте (для авто-паузы). */
+    private var stationarySince: Long? = null
     /** true — requestLocationUpdates успешно вызван (GPS-подписка живёт). */
     @Volatile private var gpsSubscribed = false
     /** true — startForeground выполнен с типом LOCATION (а не dataSync-fallback).
@@ -87,9 +97,14 @@ class TripForegroundService : Service() {
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
             val loc = result.lastLocation ?: return
-            lastFixAt = System.currentTimeMillis()
+            val now = System.currentTimeMillis()
+            lastFixAt = now
             val accuracyOk = !loc.hasAccuracy() || loc.accuracy <= MAX_ACCURACY_M
             if (!accuracyOk) return
+            gpsSpeedKmh = speedOf(loc)
+            gpsSpeedAt = now
+            prevFix = loc
+            controller.onGpsFix(now)
             val prev = lastLocation
             val moved = prev == null || prev.distanceTo(loc) >= MIN_MOVE_M
             if (moved) lastLocation = loc
@@ -102,6 +117,7 @@ class TripForegroundService : Service() {
         const val CHANNEL_ID = "trip_channel"
         const val NOTIFICATION_ID = 1001
         private const val WRITE_INTERVAL_MS = 500L  // как часто пишем reading в Room
+        private const val GPS_WRITE_INTERVAL_MS = 1000L
         private const val MIN_MOVE_M = 7f            // фильтр GPS-дрожания
         private const val MAX_ACCURACY_M = 25f       // отбрасываем «дикие» точки
         private const val GPS_INTERVAL_MS = 2000L    // период запроса фиксов у fused-провайдера
@@ -110,6 +126,26 @@ class TripForegroundService : Service() {
          *  как dataSync до выдачи разрешения), из-за которой маршрут не писался до полного
          *  перезапуска сессии. С запасом больше периода фиксов (2 c). */
         private const val GPS_STALE_MS = 20_000L
+        /** Фикс старше этого — скорость по GPS считаем неизвестной (0). */
+        private const val GPS_SPEED_MAX_AGE_MS = 6_000L
+        /** Ниже — дрожание координат на месте, а не движение. */
+        private const val GPS_MIN_SPEED_KMH = 2.5f
+        /** Данные OBD старше этого считаем устаревшими и в замер не пишем. */
+        private const val OBD_FRESH_MS = 5_000L
+        /** GPS-сессия, простоявшая столько без движения, уходит на паузу (и снова
+         *  пишется, как только машина поедет) — иначе забытая запись шла бы сутками. */
+        private const val GPS_IDLE_PAUSE_MS = 5 * 60_000L
+        private const val GPS_RESUME_SPEED_KMH = 8f
+    }
+
+    /** Скорость фикса: доплеровская от GPS-чипа, иначе по смещению от прошлого фикса. */
+    private fun speedOf(loc: Location): Float {
+        val kmh = if (loc.hasSpeed()) loc.speed * 3.6f else {
+            val p = prevFix
+            val dtS = p?.let { (loc.time - it.time) / 1000f } ?: 0f
+            if (p != null && dtS in 0.5f..10f) p.distanceTo(loc) / dtS * 3.6f else 0f
+        }
+        return if (!kmh.isFinite() || kmh < GPS_MIN_SPEED_KMH) 0f else kmh
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -137,7 +173,7 @@ class TripForegroundService : Service() {
             ServiceCompat.startForeground(
                 this,
                 NOTIFICATION_ID,
-                buildNotification("Запись поездки"),
+                buildNotification(notificationText()),
                 fgsType,
             )
         }.onFailure { stopSelf(); return }
@@ -183,47 +219,73 @@ class TripForegroundService : Service() {
         writerJob?.cancel()
         writerJob = scope.launch {
             val active = tripRepo.observeActiveTrip().filterNotNull().first()
+            runCatching { tracker.attach(active.id) }
             while (isActive) {
+                val now = System.currentTimeMillis()
+                val status = obdRepo.connectionStatus.value
+                // OBD-снимок пишем, только пока он свежий: после обрыва в latestObd
+                // остаётся последнее значение, и GPS-сессия иначе тянула бы его дальше.
+                val obdFresh = status.state == ConnectionState.CONNECTED &&
+                    status.lastSnapshotHadData &&
+                    now - (status.lastSnapshotAt ?: 0L) < OBD_FRESH_MS
+                val obd = if (obdFresh) latestObd.value else OBDData()
+                val gpsSpeed = if (now - gpsSpeedAt < GPS_SPEED_MAX_AGE_MS) gpsSpeedKmh else 0f
+                if (controller.gpsMode.value && !obdFresh) updateGpsIdlePause(now, gpsSpeed)
                 if (!controller.paused.value) {
-                    val obd = latestObd.value
                     val loc = lastLocation
-                    // Пишем reading'и независимо от наличия GPS — нам важна история OBD-параметров.
-                    // Условие «есть хоть что-то от ECU»: любой не-null PID.
+                    // Пишем замер, если есть хоть что-то: свежие данные ЭБУ или координаты.
                     val hasObd = obd.speedKmh != null || obd.rpm != null ||
                         obd.coolantTempC != null || obd.engineLoadPercent != null ||
                         obd.batteryVoltage != null || obd.throttlePercent != null ||
                         obd.mapKpa != null || obd.intakeTempC != null
                     if (hasObd || loc != null) {
-                        tripRepo.appendReading(
-                            OBDReading(
-                                tripId = active.id,
-                                timestamp = System.currentTimeMillis(),
-                                speedKmh = obd.speedKmh ?: 0f,
-                                rpm = (obd.rpm ?: 0).toFloat(),
-                                coolantTempC = (obd.coolantTempC ?: 0).toFloat(),
-                                throttlePercent = obd.throttlePercent ?: 0f,
-                                fuelLevelPercent = obd.fuelLevelPercent ?: 0f,
-                                mafGs = obd.mafGs ?: 0f,
-                                instantFuelLPer100 = obd.instantFuelLPer100 ?: 0f,
-                                batteryVoltage = obd.batteryVoltage ?: 0f,
-                                engineLoadPercent = obd.engineLoadPercent ?: 0f,
-                                intakeTempC = (obd.intakeTempC ?: 0).toFloat(),
-                                mapKpa = (obd.mapKpa ?: 0).toFloat(),
-                                ignitionTimingDeg = obd.ignitionTimingDeg ?: 0f,
-                                oilTempC = (obd.oilTempC ?: 0).toFloat(),
-                                shortFuelTrim1Pct = obd.shortFuelTrim1Pct ?: 0f,
-                                longFuelTrim1Pct = obd.longFuelTrim1Pct ?: 0f,
-                                distanceMilKm = (obd.distanceMilKm ?: 0).toFloat(),
-                                distanceSinceClearKm = (obd.distanceSinceClearKm ?: 0).toFloat(),
-                                latitude = loc?.latitude,
-                                longitude = loc?.longitude,
-                            )
+                        val reading = OBDReading(
+                            tripId = active.id,
+                            timestamp = now,
+                            // Скорость ЭБУ точнее на малых скоростях; GPS — запасной источник.
+                            speedKmh = obd.speedKmh ?: gpsSpeed,
+                            rpm = (obd.rpm ?: 0).toFloat(),
+                            coolantTempC = (obd.coolantTempC ?: 0).toFloat(),
+                            throttlePercent = obd.throttlePercent ?: 0f,
+                            fuelLevelPercent = obd.fuelLevelPercent ?: 0f,
+                            mafGs = obd.mafGs ?: 0f,
+                            instantFuelLPer100 = obd.instantFuelLPer100 ?: 0f,
+                            batteryVoltage = obd.batteryVoltage ?: 0f,
+                            engineLoadPercent = obd.engineLoadPercent ?: 0f,
+                            intakeTempC = (obd.intakeTempC ?: 0).toFloat(),
+                            mapKpa = (obd.mapKpa ?: 0).toFloat(),
+                            ignitionTimingDeg = obd.ignitionTimingDeg ?: 0f,
+                            oilTempC = (obd.oilTempC ?: 0).toFloat(),
+                            shortFuelTrim1Pct = obd.shortFuelTrim1Pct ?: 0f,
+                            longFuelTrim1Pct = obd.longFuelTrim1Pct ?: 0f,
+                            distanceMilKm = (obd.distanceMilKm ?: 0).toFloat(),
+                            distanceSinceClearKm = (obd.distanceSinceClearKm ?: 0).toFloat(),
+                            latitude = loc?.latitude,
+                            longitude = loc?.longitude,
                         )
+                        tripRepo.appendReading(reading)
+                        runCatching { tracker.onReading(reading) }
                     }
                 }
-                delay(WRITE_INTERVAL_MS)
+                // Без адаптера данные приходят только с GPS (фикс раз в 2 c) — чаще писать незачем.
+                delay(if (obdFresh) WRITE_INTERVAL_MS else GPS_WRITE_INTERVAL_MS)
             }
         }
+    }
+
+    /** Авто-пауза GPS-сессии на долгой стоянке и снятие паузы, когда машина поехала. */
+    private fun updateGpsIdlePause(now: Long, gpsSpeed: Float) {
+        if (gpsSpeed >= GPS_RESUME_SPEED_KMH) {
+            stationarySince = null
+            if (controller.paused.value) controller.setPaused(false)
+            return
+        }
+        if (gpsSpeed >= TripMath.MOVING_THRESHOLD_KMH) {
+            stationarySince = null
+            return
+        }
+        val since = stationarySince ?: now.also { stationarySince = it }
+        if (now - since >= GPS_IDLE_PAUSE_MS && !controller.paused.value) controller.setPaused(true)
     }
 
     private fun stop() {
@@ -232,9 +294,13 @@ class TripForegroundService : Service() {
         gpsRetryJob?.cancel(); gpsRetryJob = null
         stopGps()
         controller.reset()
+        scope.launch { tracker.detach() }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
+
+    private fun notificationText(): String =
+        if (controller.gpsMode.value) "Запись маршрута по GPS" else "Запись поездки"
 
     private fun hasFineLocation(): Boolean = ContextCompat.checkSelfPermission(
         this, Manifest.permission.ACCESS_FINE_LOCATION
@@ -249,7 +315,7 @@ class TripForegroundService : Service() {
             ServiceCompat.startForeground(
                 this,
                 NOTIFICATION_ID,
-                buildNotification("Запись поездки"),
+                buildNotification(notificationText()),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION,
             )
             fgsHasLocationType = true
@@ -298,6 +364,9 @@ class TripForegroundService : Service() {
         runCatching { fusedClient?.removeLocationUpdates(locationCallback) }
         fusedClient = null
         lastLocation = null
+        prevFix = null
+        gpsSpeedKmh = 0f
+        stationarySince = null
         gpsSubscribed = false
     }
 

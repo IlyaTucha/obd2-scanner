@@ -50,9 +50,6 @@ interface TripDao {
     @Query("SELECT MAX(timestamp) FROM obd_readings WHERE tripId = :tripId")
     suspend fun lastReadingTimestamp(tripId: String): Long?
 
-    @Query("SELECT * FROM obd_readings WHERE tripId = :tripId ORDER BY timestamp ASC")
-    fun observeReadings(tripId: String): Flow<List<OBDReadingEntity>>
-
     @Query("DELETE FROM obd_readings WHERE tripId = :tripId")
     suspend fun deleteReadings(tripId: String)
 }

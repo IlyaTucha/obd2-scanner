@@ -5,22 +5,27 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -37,6 +42,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -44,7 +50,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.layout.onPlaced
+import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.util.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -66,8 +80,13 @@ import com.obd2monitor.ui.screen.trip.TripSummaryScreen
 import com.obd2monitor.ui.theme.ColorIndicator
 import com.obd2monitor.ui.theme.ColorNavBorder
 import com.obd2monitor.ui.theme.ColorNavPill
+import com.obd2monitor.ui.theme.ColorTextPrimary
 import com.obd2monitor.ui.theme.ColorTextSecondary
 import kotlinx.coroutines.launch
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.floor
+import kotlin.math.sin
 
 object Routes {
     const val TABS = "tabs"
@@ -113,9 +132,17 @@ private fun pluralTap(n: Int): String = when {
 fun AppNavigation() {
     val navController = rememberNavController()
 
+    // Новый экран быстро въезжает (150 мс), а уходящий исчезает сразу. Карта
+    // рисуется на отдельной GL-поверхности, которая не участвует в анимациях
+    // Compose: при плавном уходе экран затухал, а карта исчезала отдельно от него.
+    // Мгновенный уход убирает экран и карту одновременно.
     NavHost(
         navController = navController,
         startDestination = Routes.TABS,
+        enterTransition = { slideInHorizontally(tween(150)) { it / 3 } + fadeIn(tween(150)) },
+        exitTransition = { ExitTransition.None },
+        popEnterTransition = { EnterTransition.None },
+        popExitTransition = { ExitTransition.None },
     ) {
         composable(Routes.TABS) {
             TabsContainer(
@@ -140,23 +167,7 @@ fun AppNavigation() {
                 viewModel = vm,
             )
         }
-        composable(
-            Routes.TRIP_HISTORY,
-            // Быстрая анимация — 150 мс slide справа + fade. Дефолтные 700 мс
-            // ощущаются «тяжело» для частого перехода между Сессией и Историей.
-            enterTransition = {
-                slideInHorizontally(animationSpec = tween(150)) { it } + fadeIn(tween(150))
-            },
-            exitTransition = {
-                slideOutHorizontally(animationSpec = tween(150)) { it } + fadeOut(tween(150))
-            },
-            popEnterTransition = {
-                slideInHorizontally(animationSpec = tween(150)) { -it / 4 } + fadeIn(tween(150))
-            },
-            popExitTransition = {
-                slideOutHorizontally(animationSpec = tween(150)) { it } + fadeOut(tween(150))
-            },
-        ) {
+        composable(Routes.TRIP_HISTORY) {
             TripHistoryScreen(
                 onBack = { navController.popBackStack() },
                 onOpenSummary = { id -> navController.navigate(Routes.tripSummary(id)) },
@@ -197,8 +208,20 @@ private fun TabsContainer(
         scope.launch { pagerState.animateScrollToPage(index) }
     }
 
-    fun goToTab(tab: NavTab) {
-        scope.launch { pagerState.scrollToPage(tab.page) }
+    fun goToTab(tab: NavTab) = goToPage(tab.page)
+
+    // При перелистывании вкладок закрываем клавиатуру и снимаем фокус с полей ввода
+    // (расшифровка кода, цена топлива): иначе клавиатура оставалась открытой поверх
+    // соседней вкладки.
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.isScrollInProgress }.collect { scrolling ->
+            if (scrolling) {
+                focusManager.clearFocus()
+                keyboard?.hide()
+            }
+        }
     }
 
     val context = LocalContext.current
@@ -236,6 +259,9 @@ private fun TabsContainer(
         Column(modifier = Modifier.fillMaxSize()) {
             HorizontalPager(
                 state = pagerState,
+                // Соседняя страница остаётся в композиции: карта на «Сессии» не
+                // пересоздаётся при каждом переходе с «Главной» и обратно.
+                beyondBoundsPageCount = 1,
                 modifier = Modifier.fillMaxSize(),
             ) { page ->
                 when (page) {
@@ -243,7 +269,10 @@ private fun TabsContainer(
                         onOpenSettings = { goToPage(PAGE_SETTINGS) },
                         onOpenDetail = onOpenDetail,
                     )
-                    PAGE_TRIP -> TripActiveScreen(onOpenHistory = onOpenHistory)
+                    PAGE_TRIP -> TripActiveScreen(
+                        onOpenHistory = onOpenHistory,
+                        onOpenSettings = { goToPage(PAGE_SETTINGS) },
+                    )
                     PAGE_DIAGNOSTICS -> DiagnosticsScreen()
                     PAGE_SETTINGS -> SettingsScreen(
                         showBackupMenu = showBackupMenu,
@@ -253,7 +282,7 @@ private fun TabsContainer(
             }
         }
         FloatingTabBar(
-            currentPage = pagerState.currentPage,
+            position = { pagerState.currentPage + pagerState.currentPageOffsetFraction },
             onTabClick = { tab ->
                 if (tab.page == PAGE_SETTINGS) {
                     val now = System.currentTimeMillis()
@@ -293,31 +322,66 @@ private fun TabsContainer(
             },
             modifier = Modifier
                 .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
                 .padding(horizontal = 14.dp, vertical = 14.dp),
         )
     }
 }
 
+/**
+ * Плавающая пилюля навигации. Подложка-«капля» не прыгает между вкладками, а
+ * перетекает вслед за свайпом: [position] — дробная позиция пейджера
+ * (currentPage + currentPageOffsetFraction). Передний край капли движется быстрее
+ * заднего, поэтому в середине перехода она вытягивается и чуть сплющивается, а
+ * у цели снова собирается в овал.
+ */
 @Composable
 private fun FloatingTabBar(
-    currentPage: Int,
+    position: () -> Float,
     onTabClick: (NavTab) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // Левый край и ширина каждой вкладки внутри пилюли (px).
+    val bounds = remember { mutableStateMapOf<Int, Pair<Float, Float>>() }
+    val pos = position().coerceIn(0f, (tabs.size - 1).toFloat())
     Row(
         modifier = modifier
             .clip(RoundedCornerShape(28.dp))
             .background(ColorNavPill)
             .border(BorderStroke(1.dp, ColorNavBorder), RoundedCornerShape(28.dp))
-            .padding(horizontal = 6.dp, vertical = 6.dp),
+            .padding(horizontal = 6.dp, vertical = 6.dp)
+            .drawBehind {
+                val from = floor(pos).toInt().coerceIn(0, tabs.size - 1)
+                val to = (from + 1).coerceAtMost(tabs.size - 1)
+                val a = bounds[from] ?: return@drawBehind
+                val b = bounds[to] ?: a
+                val f = pos - from
+                // Правый край ведёт при движении вправо (easeOut), левый догоняет
+                // (easeIn); при движении влево роли меняются сами собой.
+                val left = lerp(a.first, b.first, f * f)
+                val right = lerp(a.first + a.second, b.first + b.second, 1f - (1f - f) * (1f - f))
+                val squash = 1f - 0.14f * sin(PI.toFloat() * f)
+                val h = size.height * squash
+                drawRoundRect(
+                    color = ColorIndicator,
+                    topLeft = Offset(left, (size.height - h) / 2f),
+                    size = Size(right - left, h),
+                    cornerRadius = CornerRadius(h / 2f),
+                )
+            },
         horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         tabs.forEach { tab ->
+            // 1 — вкладка выбрана полностью, 0 — совсем нет; между ними цвет смешивается.
+            val selection = (1f - abs(pos - tab.page)).coerceIn(0f, 1f)
             BottomTabItem(
                 tab = tab,
-                selected = currentPage == tab.page,
+                tint = lerp(ColorTextSecondary, ColorTextPrimary, selection),
                 onClick = { onTabClick(tab) },
+                modifier = Modifier.onPlaced {
+                    bounds[tab.page] = it.positionInParent().x to it.size.width.toFloat()
+                },
             )
         }
     }
@@ -326,15 +390,18 @@ private fun FloatingTabBar(
 @Composable
 private fun BottomTabItem(
     tab: NavTab,
-    selected: Boolean,
+    tint: Color,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    val tint = if (selected) MaterialTheme.colorScheme.onBackground else ColorTextSecondary
     Column(
-        modifier = Modifier
+        modifier = modifier
             .clip(RoundedCornerShape(18.dp))
-            .background(if (selected) ColorIndicator else Color.Transparent)
-            .clickable(onClick = onClick)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            )
             .padding(horizontal = 12.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {

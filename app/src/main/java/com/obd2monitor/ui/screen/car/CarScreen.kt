@@ -182,21 +182,18 @@ fun CarSection(viewModel: CarViewModel = hiltViewModel()) {
         MileageCard(
             entries = state.mileage,
             onEdit = { entry -> editingMileage = entry; showMileageDialog = true },
-            onDelete = viewModel::deleteMileage,
         )
 
         SectionHeader("Обслуживание", onAdd = { editingMaintenance = null; showMaintenanceDialog = true })
         MaintenanceCard(
             statuses = state.maintenanceStatus,
             onEdit = { entry -> editingMaintenance = entry; showMaintenanceDialog = true },
-            onDelete = viewModel::deleteMaintenance,
         )
 
         SectionHeader("Расходы", onAdd = { editingExpense = null; showExpenseDialog = true })
         ExpensesCard(
             state = state,
             onEdit = { entry -> editingExpense = entry; showExpenseDialog = true },
-            onDelete = viewModel::deleteExpense,
         )
 
         // График трат по периоду (день/неделя/месяц/год). Подключается ниже
@@ -295,7 +292,7 @@ fun CarSection(viewModel: CarViewModel = hiltViewModel()) {
         AlertDialog(
             onDismissRequest = { pendingImport = null },
             containerColor = com.obd2monitor.ui.theme.ColorDialogScrim,
-            title = { Text("Заместить данные?") },
+            title = { Text("Заменить данные?") },
             text = {
                 Text(
                     "Импорт заменит весь текущий журнал активного профиля " +
@@ -312,7 +309,7 @@ fun CarSection(viewModel: CarViewModel = hiltViewModel()) {
                     viewModel.importCarReport(toApply) { saved ->
                         Toast.makeText(context, "Импортировано записей: $saved", Toast.LENGTH_LONG).show()
                     }
-                }) { Text("Заместить") }
+                }) { Text("Заменить") }
             },
             dismissButton = {
                 TextButton(onClick = { pendingImport = null }) { Text("Отмена") }
@@ -383,7 +380,6 @@ private fun InfoLine(label: String, value: String) {
 private fun MileageCard(
     entries: List<MileageEntry>,
     onEdit: (MileageEntry) -> Unit,
-    onDelete: (String) -> Unit,
 ) {
     // Collapse-state на саму карточку: по умолчанию виден только график +
     // последняя запись + ссылка «Показать все (N)». Раскрытие — полный список.
@@ -519,7 +515,6 @@ private fun ExpandToggle(
 private fun MaintenanceCard(
     statuses: List<MaintenanceStatus>,
     onEdit: (com.obd2monitor.domain.model.MaintenanceEntry) -> Unit,
-    onDelete: (String) -> Unit,
 ) {
     Column(
         Modifier
@@ -538,7 +533,7 @@ private fun MaintenanceCard(
                 color = ColorTextSecondary,
             )
         }
-        statuses.forEach { st -> MaintenanceRow(st, onEdit, onDelete) }
+        statuses.forEach { st -> MaintenanceRow(st, onEdit) }
     }
 }
 
@@ -546,7 +541,6 @@ private fun MaintenanceCard(
 private fun MaintenanceRow(
     st: MaintenanceStatus,
     onEdit: (com.obd2monitor.domain.model.MaintenanceEntry) -> Unit,
-    onDelete: (String) -> Unit,
 ) {
     val color = when (st.urgency) {
         MaintenanceStatus.Urgency.OVERDUE -> ColorError
@@ -590,7 +584,6 @@ private fun MaintenanceRow(
 private fun ExpensesCard(
     state: CarUiState,
     onEdit: (com.obd2monitor.domain.model.ExpenseEntry) -> Unit,
-    onDelete: (String) -> Unit,
 ) {
     // По умолчанию виден только последний расход + сумма по категориям.
     // По «Показать все» раскрывается полный список (десятки–сотни записей).
@@ -899,7 +892,7 @@ private fun VehicleEditDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = com.obd2monitor.ui.theme.ColorDialogScrim,
-        title = { Text("Данные авто") },
+        title = { Text("Данные автомобиля") },
         text = {
             DialogBody {
                 // Кнопка-ссылка в самом верху: быстрый ввод через каталог.
@@ -917,7 +910,7 @@ private fun VehicleEditDialog(
                     OutlinedTextField(
                         value = make,
                         onValueChange = { make = it.take(40) },
-                        placeholder = { PlaceholderText("Hyundai") },
+                        placeholder = { PlaceholderText("Марка") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(
                             capitalization = KeyboardCapitalization.Words,
@@ -931,7 +924,7 @@ private fun VehicleEditDialog(
                     OutlinedTextField(
                         value = model,
                         onValueChange = { model = it.take(40) },
-                        placeholder = { PlaceholderText("Accent") },
+                        placeholder = { PlaceholderText("Модель") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(
                             capitalization = KeyboardCapitalization.Words,
@@ -956,7 +949,7 @@ private fun VehicleEditDialog(
                     OutlinedTextField(
                         value = engine,
                         onValueChange = { engine = it.take(40) },
-                        placeholder = { PlaceholderText("1.4L G4EE DOHC") },
+                        placeholder = { PlaceholderText("1.6 бензин") },
                         singleLine = true,
                         colors = mutedTextFieldColors(),
                         modifier = Modifier.fillMaxWidth(),
@@ -966,7 +959,7 @@ private fun VehicleEditDialog(
                     OutlinedTextField(
                         value = displText,
                         onValueChange = { displText = it.filter { ch -> ch.isDigit() || ch == '.' || ch == ',' }.take(4) },
-                        placeholder = { PlaceholderText("1.4") },
+                        placeholder = { PlaceholderText("1.6") },
                         suffix = { Text("л", color = ColorTextSecondary) },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -986,7 +979,7 @@ private fun VehicleEditDialog(
                     OutlinedTextField(
                         value = tankText,
                         onValueChange = { tankText = it.filter { ch -> ch.isDigit() || ch == '.' || ch == ',' }.take(4) },
-                        placeholder = { PlaceholderText("43") },
+                        placeholder = { PlaceholderText("50") },
                         suffix = { Text("л", color = ColorTextSecondary) },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -1180,7 +1173,7 @@ private fun MileageAddDialog(
                     OutlinedTextField(
                         value = note,
                         onValueChange = { note = it.take(80) },
-                        placeholder = { PlaceholderText("после поездки в Сочи") },
+                        placeholder = { PlaceholderText("Комментарий") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                         keyboardActions = KeyboardActions(
@@ -1272,7 +1265,7 @@ private fun ExpenseAddDialog(
                     OutlinedTextField(
                         value = description,
                         onValueChange = { description = it.take(120) },
-                        placeholder = { PlaceholderText("масло Mobil 5W30 4л + фильтр") },
+                        placeholder = { PlaceholderText("Например, замена масла и фильтра") },
                         // singleLine: иначе длинное описание раскатывает поле
                         // на несколько строк и нижний край (с курсором) уезжает
                         // за пределы видимой области диалога. С однострочкой
@@ -1377,7 +1370,7 @@ private fun MaintenanceAddDialog(
                     OutlinedTextField(
                         value = note,
                         onValueChange = { note = it.take(120) },
-                        placeholder = { PlaceholderText("СТО Авто+, FELIX DOT4, ремень ГРМ Gates") },
+                        placeholder = { PlaceholderText("Например, где обслуживались и что меняли") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
                         keyboardActions = KeyboardActions(
