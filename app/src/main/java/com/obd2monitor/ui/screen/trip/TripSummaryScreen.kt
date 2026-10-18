@@ -21,7 +21,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Flag
-import androidx.compose.material.icons.outlined.LocalGasStation
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -53,7 +52,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.obd2monitor.ui.components.LineChart
 import com.obd2monitor.ui.components.MaxContentWidth
 import com.obd2monitor.ui.components.mapHeight
-import com.obd2monitor.ui.components.StatBox
 import com.obd2monitor.ui.components.YandexMapView
 import com.obd2monitor.ui.theme.ColorCard
 import com.obd2monitor.ui.theme.ColorNeutral
@@ -155,38 +153,15 @@ fun TripSummaryScreen(
                 )
             }
 
-            // Сводка. В плитке «Время» — реальное время в пути (без пауз), чтобы
-            // средняя скорость и время в пути были согласованы.
-            StatBox(
-                items = listOf(
-                    "Путь" to "%.1f км".format(trip.distanceKm),
-                    "В пути" to formatHms(trip.activeMs),
-                    "Сред." to "%.0f км/ч".format(trip.avgSpeedKmh),
-                ),
+            // Итоги одной карточкой: пробег, макс. скорость, топливо. Время — в строке
+            // под датой, средняя скорость, остановки и ускорения — в карточках ниже.
+            TotalsCard(
+                distanceKm = trip.distanceKm,
+                maxSpeedKmh = trip.maxSpeedKmh,
+                fuelLiters = trip.fuelUsedLiters,
+                avgConsumption = trip.avgFuelConsumption,
+                tripCostRub = state.tripCostRub,
             )
-
-            // У сессии, записанной только по GPS, данных о топливе нет — блок не показываем.
-            if (trip.fuelUsedLiters > 0f) {
-                FuelCard(
-                    fuelLiters = trip.fuelUsedLiters,
-                    avgConsumption = trip.avgFuelConsumption,
-                    tripCostRub = state.tripCostRub,
-                )
-            }
-
-            // Расчётные показатели за сессию: пиковое ускорение, макс скорость.
-            val extraStats = buildList {
-                add("Макс." to "%.0f км/ч".format(trip.maxSpeedKmh))
-                state.peakAccelMs2?.let {
-                    add("Разгон" to "%+.1f м/с²".format(it))
-                }
-                state.peakBrakeMs2?.let {
-                    add("Торм." to "%+.1f м/с²".format(it))
-                }
-            }
-            if (extraStats.isNotEmpty()) {
-                StatBox(items = extraStats)
-            }
 
             // Параметры — мин/сред/макс + кривая по каждому
             if (state.parameters.isNotEmpty()) {
@@ -339,9 +314,15 @@ private fun ParameterCard(p: ParamSummary, onClick: (() -> Unit)? = null) {
             }
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                StatTriple("Мин", "%.1f".format(p.min))
-                StatTriple("Сред", "%.1f".format(p.avg))
-                StatTriple("Макс", "%.1f".format(p.max))
+                val stats = p.stats
+                if (stats != null) {
+                    stats.forEach { (label, value) -> StatTriple(label, value) }
+                } else {
+                    StatTriple("Мин.", "%.1f".format(p.min))
+                    StatTriple("Сред.", "%.1f".format(p.avg))
+                    p.movingAvg?.let { StatTriple("Сред. на ходу", "%.1f".format(it)) }
+                    StatTriple("Макс.", "%.1f".format(p.max))
+                }
             }
             Spacer(Modifier.height(10.dp))
             Box(
@@ -352,11 +333,21 @@ private fun ParameterCard(p: ParamSummary, onClick: (() -> Unit)? = null) {
                     .background(MaterialTheme.colorScheme.surface)
                     .padding(4.dp),
             ) {
-                LineChart(values = p.series, color = ColorNeutral, zeroCentered = p.key == "accel")
+                if (p.key == "stops") {
+                    LineChart(
+                        values = p.series, color = ColorNeutral, pointTimes = p.times,
+                        gridLines = 1, valueFormatter = ::stopLabel,
+                    )
+                } else {
+                    LineChart(values = p.series, color = ColorNeutral, zeroCentered = p.key == "accel", pointTimes = p.times)
+                }
             }
         }
     }
 }
+
+/** Подпись оси и подсказки графика остановок: ряд 0/1. */
+internal fun stopLabel(v: Float): String = if (v >= 0.5f) "стоял" else "ехал"
 
 @Composable
 private fun StatTriple(label: String, value: String) {
@@ -366,54 +357,48 @@ private fun StatTriple(label: String, value: String) {
     }
 }
 
+/**
+ * Итоги поездки сеткой в две колонки: путь и макс. скорость, затем топливо.
+ * У сессии, записанной только по GPS, данных о топливе нет — строки топлива скрыты.
+ * Стоимость — только когда в профиле задана цена топлива (Настройки → Цена топлива).
+ */
 @Composable
-private fun FuelCard(
+private fun TotalsCard(
+    distanceKm: Float,
+    maxSpeedKmh: Float,
     fuelLiters: Float,
     avgConsumption: Float,
     tripCostRub: Float?,
 ) {
-    Box(
+    val rows = buildList {
+        add(("Путь" to "%.1f км".format(distanceKm)) to ("Макс. скорость" to "%.0f км/ч".format(maxSpeedKmh)))
+        if (fuelLiters > 0f) {
+            add(("Топливо" to "%.2f л".format(fuelLiters)) to ("Средний расход" to "%.1f л/100 км".format(avgConsumption)))
+            if (tripCostRub != null) add(("Стоимость" to "%.0f ₽".format(tripCostRub)) to null)
+        }
+    }
+    Column(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
             .background(ColorCard)
             .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Column {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    Icons.Outlined.LocalGasStation,
-                    contentDescription = null,
-                    tint = ColorNeutral,
-                    modifier = Modifier.size(18.dp),
-                )
-                Spacer(Modifier.width(8.dp))
-                Text("Топливо", color = ColorNeutral, style = MaterialTheme.typography.labelMedium)
-            }
-            Spacer(Modifier.height(6.dp))
+        rows.forEach { (left, right) ->
             Row {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Потрачено", color = ColorTextSecondary, style = MaterialTheme.typography.labelSmall)
-                    Text("%.2f л".format(fuelLiters), style = MaterialTheme.typography.headlineSmall)
-                }
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Средний", color = ColorTextSecondary, style = MaterialTheme.typography.labelSmall)
-                    Text("%.1f л/100 км".format(avgConsumption), style = MaterialTheme.typography.headlineSmall)
-                }
-            }
-            // Стоимость показывается только когда в профиле задана fuelPrice
-            // (Настройки → Цена топлива).
-            if (tripCostRub != null) {
-                Spacer(Modifier.height(10.dp))
-                Column {
-                    Text("Стоимость", color = ColorTextSecondary, style = MaterialTheme.typography.labelSmall)
-                    Text(
-                        "%.0f ₽".format(tripCostRub),
-                        style = MaterialTheme.typography.headlineSmall,
-                    )
-                }
+                TotalsCell(left, Modifier.weight(1f))
+                if (right != null) TotalsCell(right, Modifier.weight(1f)) else Spacer(Modifier.weight(1f))
             }
         }
+    }
+}
+
+@Composable
+private fun TotalsCell(item: Pair<String, String>, modifier: Modifier) {
+    Column(modifier) {
+        Text(item.first, color = ColorTextSecondary, style = MaterialTheme.typography.labelSmall)
+        Text(item.second, style = MaterialTheme.typography.headlineSmall)
     }
 }
 

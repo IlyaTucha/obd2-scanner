@@ -1,6 +1,7 @@
 package com.obd2monitor.data.repository
 
 import com.obd2monitor.data.database.TripDao
+import com.obd2monitor.data.database.TripEntity
 import com.obd2monitor.data.database.VehicleProfileDao
 import com.obd2monitor.data.database.toDomain
 import com.obd2monitor.data.database.toEntity
@@ -65,10 +66,12 @@ class TripRepositoryImpl @Inject constructor(
         val current = dao.getById(tripId) ?: return
         val readings = dao.readingsFor(tripId).map { it.toDomain() }
         val profile = vehicleDao.getById(current.vehicleProfileId)?.toDomain()
+        val now = System.currentTimeMillis()
         if (readings.isEmpty()) {
-            dao.update(current.copy(endTime = System.currentTimeMillis()))
+            dao.update(current.copy(endTime = now))
             return
         }
+        val (endTime, pausedMs) = endAndPause(current, readings, finishedAt = now)
         // Расстояние: интегрируем скорость × dt; разрывы записи (паузы) не считаем ездой.
         val distance = TripMath.distanceKm(readings)
         var maxSpeed = 0f
@@ -85,14 +88,14 @@ class TripRepositoryImpl @Inject constructor(
             speedsKmh = FloatArray(readings.size) { readings[it].speedKmh },
             fuelRateLPerHour = FloatArray(readings.size) { ReadingMetrics.fuelRateLh(readings[it], profile) },
         )
-        val now = System.currentTimeMillis()
         // Средняя — по времени в пути (без пауз), как и плитка «В пути» в отчёте.
-        val activeH = ((now - current.startTime - current.pausedMs).coerceAtLeast(0L)) / 3_600_000f
+        val activeH = ((endTime - current.startTime - pausedMs).coerceAtLeast(0L)) / 3_600_000f
         val avgSpeed = if (activeH > 0f) distance / activeH else 0f
         val avgCons = if (distance > 0.05f) totalLiters / distance * 100f else 0f
         dao.update(
             current.copy(
-                endTime = now,
+                endTime = endTime,
+                pausedMs = pausedMs,
                 distanceKm = distance,
                 avgSpeedKmh = avgSpeed,
                 maxSpeedKmh = maxSpeed,
@@ -102,6 +105,47 @@ class TripRepositoryImpl @Inject constructor(
                 maxRpm = maxRpm,
             )
         )
+    }
+
+    /** Меняет только время окончания, паузу и среднюю скорость: пробег и топливо
+     *  поездки остаются такими, какими их посчитали при завершении. */
+    override suspend fun trimTrailingPauses() {
+        dao.finishedWithTrailingGap(TripMath.MAX_GAP_MS).forEach { trip ->
+            val finishedAt = trip.endTime ?: return@forEach
+            val readings = dao.readingsFor(trip.id).map { it.toDomain() }
+            if (readings.isEmpty()) return@forEach
+            val (endTime, pausedMs) = endAndPause(trip, readings, finishedAt)
+            val activeH = ((endTime - trip.startTime - pausedMs).coerceAtLeast(0L)) / 3_600_000f
+            dao.update(
+                trip.copy(
+                    endTime = endTime,
+                    pausedMs = pausedMs,
+                    avgSpeedKmh = if (activeH > 0f) trip.distanceKm / activeH else trip.avgSpeedKmh,
+                )
+            )
+        }
+    }
+
+    /**
+     * Конец поездки и итоговая пауза при завершении в [finishedAt]. Если после
+     * последнего замера шла пауза (заглушили двигатель, отключился адаптер, сессия
+     * закрылась сама через AUTO_FINISH_PAUSE_MS), поездка кончается на последнем
+     * замере, а этот хвост вычитается из pausedMs: «Всего» не включает стоянку после
+     * приезда.
+     *
+     * Пауза зажата между разрывами, видными по самим замерам (хвост мог попасть в
+     * pausedMs не целиком, если приложение было убито), и временем без записи — она
+     * не может быть больше, иначе «В пути» уходит в минус.
+     */
+    private fun endAndPause(trip: TripEntity, readings: List<OBDReading>, finishedAt: Long): Pair<Long, Long> {
+        val lastTs = readings.last().timestamp
+        val tailMs = finishedAt - lastTs
+        val trimTail = tailMs > TripMath.MAX_GAP_MS
+        val endTime = if (trimTail) lastTs else finishedAt
+        val minPause = TripMath.recordedGapsMs(readings, trip.startTime)
+        val maxPause = (endTime - trip.startTime - TripMath.recordedSpanMs(readings)).coerceAtLeast(minPause)
+        val paused = (if (trimTail) trip.pausedMs - tailMs else trip.pausedMs).coerceIn(minPause, maxPause)
+        return endTime to paused
     }
 
     override suspend fun deleteTrip(tripId: String) {

@@ -45,6 +45,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
 import com.obd2monitor.domain.model.MetricCatalog
 import com.obd2monitor.ui.components.LineChart
+import com.obd2monitor.ui.screen.trip.MOVING_AVG_HINT
+import com.obd2monitor.ui.screen.trip.movingAverage
+import com.obd2monitor.ui.components.NormLine
 import com.obd2monitor.ui.components.ScreenColumn
 import com.obd2monitor.ui.components.StatBox
 import com.obd2monitor.ui.theme.ColorCard
@@ -61,12 +64,13 @@ fun ParameterDetailScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     // Полная история за сессию: из БД, обновляется раз в несколько секунд, пока
     // экран открыт (раньше пересчитывалась целиком на каждом новом снимке OBD).
-    val series by produceState(initialValue = state.histories[metricKey]?.values.orEmpty(), metricKey) {
+    val session by produceState(initialValue = SessionSeries(state.histories[metricKey]?.values.orEmpty()), metricKey) {
         while (true) {
             value = viewModel.sessionSeries(metricKey)
             delay(5_000)
         }
     }
+    val series = session.values
     val info = MetricCatalog.forKey(metricKey, state.activeProfile)
     val current = currentValue(metricKey, state)
     val min = series.minOrNull()
@@ -79,6 +83,7 @@ fun ParameterDetailScreen(
     // отдаём его (совпадает с Trip.avgFuelConsumption в отчёте сессии).
     val avg = if (metricKey == "fuel") state.tripAvgConsumption
         else series.takeIf { it.isNotEmpty() }?.average()?.toFloat()
+    val movingAvg = movingAverage(metricKey, series, session.moving)
 
     // Сброс выделения точки на LineChart при тапе ВНЕ chart-области.
     // Инкрементируется во внешнем pointerInput → проксируется в LineChart как
@@ -109,16 +114,21 @@ fun ParameterDetailScreen(
                 color = ColorNeutral,
                 zeroCentered = metricKey == "accel",
                 resetSelectionKey = chartResetTick,
+                pointTimes = session.times,
             )
         }
         StatBox(
-            items = listOf(
+            items = listOfNotNull(
                 "Сейч." to (current?.let { "%.1f".format(it) } ?: "—"),
-                "Мин" to (min?.let { "%.1f".format(it) } ?: "—"),
-                "Макс" to (max?.let { "%.1f".format(it) } ?: "—"),
-                "Сред" to (avg?.let { "%.1f".format(it) } ?: "—"),
+                "Мин." to (min?.let { "%.1f".format(it) } ?: "—"),
+                "Макс." to (max?.let { "%.1f".format(it) } ?: "—"),
+                "Сред." to (avg?.let { "%.1f".format(it) } ?: "—"),
+                movingAvg?.let { "Сред. на ходу" to "%.1f".format(it) },
             ),
         )
+        if (movingAvg != null) {
+            Text(MOVING_AVG_HINT, color = ColorTextSecondary, style = MaterialTheme.typography.bodySmall)
+        }
 
         // Раскрывающаяся секция «Что это?»: краткая всегда видна, детали — по тапу.
         var expanded by remember { mutableStateOf(false) }
@@ -154,12 +164,7 @@ fun ParameterDetailScreen(
             // Краткая — всегда
             Text(info.brief, style = MaterialTheme.typography.bodyMedium)
             if (info.normalRange.isNotBlank()) {
-                val withUnit = if (info.unit.isNotBlank()) "${info.normalRange} ${info.unit}" else info.normalRange
-                Text(
-                    "Норма: $withUnit",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = ColorTextSecondary,
-                )
+                NormLine(MetricCatalog.normLabel(state.activeProfile), info.normalRange)
             }
             // Подробная — раскрывается
             AnimatedVisibility(

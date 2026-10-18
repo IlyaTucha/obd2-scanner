@@ -32,6 +32,10 @@ data class MetricHistory(val key: String, val values: List<Float> = emptyList())
     }
 }
 
+/** История параметра за сессию; [times] — время каждой точки, мс, [moving] — ехала ли
+ *  машина в этой точке (оба null — неизвестно, ряд из памяти). */
+data class SessionSeries(val values: List<Float>, val times: List<Long>? = null, val moving: List<Boolean>? = null)
+
 data class DashboardUiState(
     val data: OBDData = OBDData(),
     val connection: ConnectionStatus = ConnectionStatus(),
@@ -118,19 +122,24 @@ class DashboardViewModel @Inject constructor(
     /**
      * Полная история параметра за активную сессию — из БД; если сессии нет или
      * параметр не пишется в замеры (запас хода, стоимость) — то, что есть в памяти.
+     * Время точек есть только у ряда из БД; у ряда из памяти — null (ось в %).
      */
-    suspend fun sessionSeries(key: String): List<Float> {
+    suspend fun sessionSeries(key: String): SessionSeries {
         val tripId = _state.value.trip.tripId
-        val inMemory = _state.value.histories[key]?.values.orEmpty()
+        val inMemory = SessionSeries(_state.value.histories[key]?.values.orEmpty())
         if (tripId == null) return inMemory
         val profile = _state.value.activeProfile
         val fromDb = withContext(Dispatchers.Default) {
             val readings = tripRepo.readingsFor(tripId)
             if (key == "accel" || readings.isNotEmpty() && ReadingMetrics.value(key, readings.first(), profile) != null) {
-                ReadingMetrics.series(key, readings, profile)
+                SessionSeries(
+                    ReadingMetrics.series(key, readings, profile),
+                    ReadingMetrics.seriesTimes(key, readings),
+                    ReadingMetrics.seriesMoving(key, readings),
+                )
             } else null
         }
-        return fromDb?.takeIf { s -> s.any { it != 0f && it.isFinite() } } ?: inMemory
+        return fromDb?.takeIf { s -> s.values.any { it != 0f && it.isFinite() } } ?: inMemory
     }
 
     private fun onLive(data: OBDData) {

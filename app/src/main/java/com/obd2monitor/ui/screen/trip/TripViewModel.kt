@@ -38,6 +38,8 @@ data class TripUiState(
     /** Timestamp начала текущей непрерывной паузы, либо null. UI вычитает из (start + AUTO_FINISH)
      *  чтобы показать сколько осталось до авто-завершения сессии. */
     val pauseSinceMs: Long? = null,
+    /** Пауза поставлена кнопкой «Пауза»: без авто-завершения. */
+    val manualPause: Boolean = false,
     /** Сессия записывается по GPS (начата без адаптера). */
     val gpsMode: Boolean = false,
     val lastGpsFixAt: Long? = null,
@@ -87,6 +89,14 @@ class TripViewModel @Inject constructor(
         viewModelScope.launch { sessions.finishByUser() }
     }
 
+    fun pause() {
+        viewModelScope.launch { sessions.pauseByUser() }
+    }
+
+    fun resume() {
+        viewModelScope.launch { sessions.resumeByUser() }
+    }
+
     /** Начать запись маршрута по GPS без адаптера. */
     fun startGpsTrip() {
         viewModelScope.launch { sessions.startGpsTrip() }
@@ -107,6 +117,7 @@ class TripViewModel @Inject constructor(
         controller.pausedMs.onEach { update { copy(pausedMs = it) } }.launchIn(viewModelScope)
         controller.paused.onEach { update { copy(paused = it) } }.launchIn(viewModelScope)
         controller.pauseSinceMs.onEach { update { copy(pauseSinceMs = it) } }.launchIn(viewModelScope)
+        controller.manualPause.onEach { update { copy(manualPause = it) } }.launchIn(viewModelScope)
         controller.gpsMode.onEach { update { copy(gpsMode = it) } }.launchIn(viewModelScope)
         controller.lastGpsFixAt.onEach { update { copy(lastGpsFixAt = it) } }.launchIn(viewModelScope)
     }

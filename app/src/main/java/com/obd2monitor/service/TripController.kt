@@ -52,6 +52,13 @@ class TripController @Inject constructor(
      *  AutoSessionManager-watchdog'ом для авто-finish после длительного простоя. */
     val pauseSinceMs: StateFlow<Long?> = _pauseSinceMs.asStateFlow()
 
+    private val _manualPause = MutableStateFlow(false)
+    /** Пауза поставлена пользователем кнопкой «Пауза». Её не снимают watchdog'и по
+     *  данным, и поездка на ней не завершается сама через AUTO_FINISH_PAUSE_MS.
+     *  Снимается кнопкой «Продолжить» или при следующем запуске двигателя (см.
+     *  AutoSessionManager). */
+    val manualPause: StateFlow<Boolean> = _manualPause.asStateFlow()
+
     private val _gpsMode = MutableStateFlow(false)
     /** Сессия начата вручную кнопкой «Запись по GPS». В этом режиме обрыв OBD не
      *  ставит запись на паузу — маршрут, скорость и пробег пишутся по спутникам. */
@@ -137,6 +144,11 @@ class TripController @Inject constructor(
         }
     }
 
+    fun setManualPause(value: Boolean) {
+        _manualPause.value = value
+        if (value) setPaused(true)
+    }
+
     fun onGpsFix(at: Long) { _lastGpsFixAt.value = at }
 
     /** Вызывать при старте новой сессии. Сбрасывает счётчик. */
@@ -149,6 +161,7 @@ class TripController @Inject constructor(
         unflushedPauseMs = 0L
         lastFlushAt = System.currentTimeMillis()
         _paused.value = false
+        _manualPause.value = false
         _pauseSinceMs.value = null
         _finishRequested.value = false
     }
@@ -156,7 +169,7 @@ class TripController @Inject constructor(
     /** Усыновление осиротевшей сессии после force-stop'а. Подхватывает уже
      *  накопленные durationMs/pausedMs из БД, чтобы UI показывал корректное
      *  время (а не «00:00:00» сразу после рестарта приложения). */
-    fun onTripAdopted(tripId: String, startTime: Long, pausedMsSoFar: Long, gpsMode: Boolean) {
+    fun onTripAdopted(tripId: String, startTime: Long, pausedMsSoFar: Long, gpsMode: Boolean, manualPause: Boolean) {
         currentTripId = tripId
         _gpsMode.value = gpsMode
         _lastGpsFixAt.value = null
@@ -169,6 +182,7 @@ class TripController @Inject constructor(
         // Сессия начинается с паузы — записи нет до восстановления подключения
         // (GPS-сессию снимает с паузы сервис, как только машина поедет).
         _paused.value = true
+        _manualPause.value = manualPause
         // Отсчёт «текущей» паузы стартуем с сейчас. Не с момента app-death, потому что
         // pausedMsSoFar уже содержит downtime (см. AutoSessionManager.adoptOrphanIfAny),
         // и иначе watchdog мгновенно бы триггерил auto-finish.
@@ -185,6 +199,7 @@ class TripController @Inject constructor(
         _gpsMode.value = false
         _lastGpsFixAt.value = null
         _paused.value = false
+        _manualPause.value = false
         _pauseSinceMs.value = null
         _finishRequested.value = false
         // Финальный flush, чтобы итоговое pausedMs было точным.

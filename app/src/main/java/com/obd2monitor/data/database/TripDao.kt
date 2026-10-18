@@ -62,6 +62,14 @@ interface TripDao {
     @Query("SELECT MAX(timestamp) FROM obd_readings WHERE tripId = :tripId")
     suspend fun lastReadingTimestamp(tripId: String): Long?
 
+    /** Завершённые поездки, у которых конец позже последнего замера больше чем на
+     *  [gapMs]: время окончания включает хвост паузы. */
+    @Query(
+        "SELECT * FROM trips t WHERE t.endTime IS NOT NULL AND " +
+            "t.endTime - (SELECT MAX(r.timestamp) FROM obd_readings r WHERE r.tripId = t.id) > :gapMs"
+    )
+    suspend fun finishedWithTrailingGap(gapMs: Long): List<TripEntity>
+
     /**
      * Показания без сессии (сессия удалена раньше, чем сервис дописал последние
      * точки, — бывало в старых версиях). Нигде не видны и не экспортируются.

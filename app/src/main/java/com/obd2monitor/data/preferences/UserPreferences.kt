@@ -22,6 +22,7 @@ class UserPreferences @Inject constructor(
         val LAST_DEVICE_NAME = stringPreferencesKey("last_device_name")
         val AUTO_CONNECT = booleanPreferencesKey("auto_connect")
         val GPS_TRIP_ID = stringPreferencesKey("gps_trip_id")
+        val MANUAL_PAUSE_TRIP_ID = stringPreferencesKey("manual_pause_trip_id")
     }
 
     val lastDeviceAddress: Flow<String?> = context.dataStore.data.map { it[Keys.LAST_DEVICE] }
@@ -29,6 +30,9 @@ class UserPreferences @Inject constructor(
     /** id открытой GPS-сессии — чтобы после перезапуска процесса продолжить её в том же
      *  режиме, а не ждать подключения адаптера. */
     val gpsTripId: Flow<String?> = context.dataStore.data.map { it[Keys.GPS_TRIP_ID] }
+    /** id поездки на ручной паузе — чтобы после перезапуска процесса она не закрылась
+     *  автоматически через AUTO_FINISH_PAUSE_MS. */
+    val manualPauseTripId: Flow<String?> = context.dataStore.data.map { it[Keys.MANUAL_PAUSE_TRIP_ID] }
 
     suspend fun setLastDevice(address: String?, name: String?) {
         context.dataStore.edit { p ->
@@ -41,5 +45,9 @@ class UserPreferences @Inject constructor(
 
     suspend fun setGpsTripId(id: String?) = context.dataStore.edit { p ->
         if (id == null) p.remove(Keys.GPS_TRIP_ID) else p[Keys.GPS_TRIP_ID] = id
+    }
+
+    suspend fun setManualPauseTripId(id: String?) = context.dataStore.edit { p ->
+        if (id == null) p.remove(Keys.MANUAL_PAUSE_TRIP_ID) else p[Keys.MANUAL_PAUSE_TRIP_ID] = id
     }
 }

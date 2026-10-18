@@ -31,7 +31,8 @@ import com.obd2monitor.ui.theme.ColorTextSecondary
 
 /**
  * Карточка параметра: иконка, название, значение и мини-график за последние минуты.
- * Название в одну строку — иначе строки сетки получались разной высоты.
+ * Название всегда занимает две строки (короткое — с пустой второй): длинные
+ * названия не обрезаются, а все карточки сетки остаются одной высоты.
  */
 @Composable
 fun DataCard(
@@ -54,7 +55,7 @@ fun DataCard(
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.SpaceBetween,
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(verticalAlignment = Alignment.Top) {
             Icon(
                 imageVector = icon,
                 contentDescription = null,
@@ -66,7 +67,8 @@ fun DataCard(
                 title,
                 style = MaterialTheme.typography.labelMedium,
                 color = ColorTextSecondary,
-                maxLines = 1,
+                minLines = 2,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
         }

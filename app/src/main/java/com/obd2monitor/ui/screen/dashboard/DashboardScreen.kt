@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.obd2monitor.data.obd.ReadingMetrics
+import com.obd2monitor.domain.model.MetricNames
 import com.obd2monitor.domain.model.ConnectionState
 import com.obd2monitor.ui.components.AdaptiveGrid
 import com.obd2monitor.ui.components.ConnectionBar
@@ -172,43 +173,43 @@ private fun buildCardGroups(state: DashboardUiState): List<Pair<String, List<Car
     } ?: ColorTextPrimary
 
     val engine = buildList {
-        add(CardSpec("coolant", Icons.Outlined.Thermostat, "Антифриз",
+        add(CardSpec("coolant", Icons.Outlined.Thermostat, MetricNames.of("coolant"),
             data.coolantTempC?.toString() ?: "—", "°C", coolantColor))
-        add(CardSpec("battery", Icons.Outlined.BatteryFull, "Бортсеть", data.batteryVoltage?.let { "%.2f".format(it) } ?: "—", "В", batteryColor))
-        add(CardSpec("load", Icons.Outlined.Memory, "Нагрузка", f0(data.engineLoadPercent), "%"))
-        add(CardSpec("throttle", Icons.Outlined.Tune, "Дроссель", f1(data.throttlePercent), "%"))
+        add(CardSpec("battery", Icons.Outlined.BatteryFull, MetricNames.of("battery"), data.batteryVoltage?.let { "%.2f".format(it) } ?: "—", "В", batteryColor))
+        add(CardSpec("load", Icons.Outlined.Memory, MetricNames.of("load"), f0(data.engineLoadPercent), "%"))
+        add(CardSpec("throttle", Icons.Outlined.Tune, MetricNames.of("throttle"), f1(data.throttlePercent), "%"))
         // Прогрев актуален, пока двигатель холодный.
-        if (has("warmup", data.warmupPct)) add(CardSpec("warmup", Icons.Outlined.Whatshot, "Прогрев", f0(data.warmupPct), "%",
+        if (has("warmup", data.warmupPct)) add(CardSpec("warmup", Icons.Outlined.Whatshot, MetricNames.of("warmup"), f0(data.warmupPct), "%",
             if ((data.warmupPct ?: 0f) >= 99f) ColorSuccess else ColorWarning))
-        if (has("oil", data.oilTempC)) add(CardSpec("oil", Icons.Outlined.OilBarrel, "Масло", data.oilTempC?.toString() ?: "—", "°C"))
-        add(CardSpec("intake", Icons.Outlined.Air, "Воздух на впуске", data.intakeTempC?.toString() ?: "—", "°C"))
-        add(CardSpec("timing", Icons.Outlined.Timer, "Угол зажигания", f1(data.ignitionTimingDeg), "°"))
-        if (has("ambient", data.ambientTempC)) add(CardSpec("ambient", Icons.Outlined.AcUnit, "За бортом", data.ambientTempC?.toString() ?: "—", "°C"))
+        if (has("oil", data.oilTempC)) add(CardSpec("oil", Icons.Outlined.OilBarrel, MetricNames.of("oil"), data.oilTempC?.toString() ?: "—", "°C"))
+        add(CardSpec("intake", Icons.Outlined.Air, MetricNames.of("intake"), data.intakeTempC?.toString() ?: "—", "°C"))
+        add(CardSpec("timing", Icons.Outlined.Timer, MetricNames.of("timing"), f1(data.ignitionTimingDeg), "°"))
+        if (has("ambient", data.ambientTempC)) add(CardSpec("ambient", Icons.Outlined.AcUnit, MetricNames.of("ambient"), data.ambientTempC?.toString() ?: "—", "°C"))
     }
 
     val fuel = buildList {
-        add(CardSpec("fuelh", Icons.Outlined.LocalGasStation, "Расход сейчас", f1(data.instantFuelLPerH), "л/ч"))
-        if (has("fuellevel", data.fuelLevelPercent)) add(CardSpec("fuellevel", Icons.Outlined.Opacity, "Топливо в баке", f0(data.fuelLevelPercent), "%"))
-        if (has("range", state.rangeKm)) add(CardSpec("range", Icons.Outlined.Route, "Запас хода", f0(state.rangeKm), "км"))
+        add(CardSpec("fuelh", Icons.Outlined.LocalGasStation, MetricNames.of("fuelh"), f1(data.instantFuelLPerH), "л/ч"))
+        if (has("fuellevel", data.fuelLevelPercent)) add(CardSpec("fuellevel", Icons.Outlined.Opacity, MetricNames.of("fuellevel"), f0(data.fuelLevelPercent), "%"))
+        if (has("range", state.rangeKm)) add(CardSpec("range", Icons.Outlined.Route, MetricNames.of("range"), f0(state.rangeKm), "км"))
         if (has("tripcost", state.tripCostRub)) add(CardSpec("tripcost", Icons.Outlined.Payments, "Стоимость сессии", f0(state.tripCostRub), "₽"))
         if (has("cost100", state.costPer100Rub)) add(CardSpec("cost100", Icons.Outlined.Payments, "Цена 100 км", f0(state.costPer100Rub), "₽"))
-        if (has("stft", data.shortFuelTrim1Pct)) add(CardSpec("stft", Icons.Outlined.WaterDrop, "Краткая коррекция",
+        if (has("stft", data.shortFuelTrim1Pct)) add(CardSpec("stft", Icons.Outlined.WaterDrop, MetricNames.of("stft"),
             data.shortFuelTrim1Pct?.let { "%+.1f".format(it) } ?: "—", "%"))
-        if (has("ltft", data.longFuelTrim1Pct)) add(CardSpec("ltft", Icons.Outlined.WaterDrop, "Долгая коррекция",
+        if (has("ltft", data.longFuelTrim1Pct)) add(CardSpec("ltft", Icons.Outlined.WaterDrop, MetricNames.of("ltft"),
             data.longFuelTrim1Pct?.let { "%+.1f".format(it) } ?: "—", "%"))
     }
 
     val dynamics = buildList {
-        if (has("power", data.powerKw)) add(CardSpec("power", Icons.Outlined.Bolt, "Мощность",
+        if (has("power", data.powerKw)) add(CardSpec("power", Icons.Outlined.Bolt, MetricNames.of("power"),
             f0(data.powerKw?.let { it * ReadingMetrics.KW_TO_HP }), "л.с."))
-        if (has("torque", data.torqueNm)) add(CardSpec("torque", Icons.Outlined.Settings, "Крутящий момент", f0(data.torqueNm), "Н·м"))
+        if (has("torque", data.torqueNm)) add(CardSpec("torque", Icons.Outlined.Settings, MetricNames.of("torque"), f0(data.torqueNm), "Н·м"))
         if (kotlin.math.abs(state.accelMs2) > 0.05f || state.histories["accel"]?.values?.any { kotlin.math.abs(it) > 0.05f } == true) {
-            add(CardSpec("accel", Icons.Outlined.Speed, "Ускорение", "%+.1f".format(state.accelMs2), "м/с²",
+            add(CardSpec("accel", Icons.Outlined.Speed, MetricNames.of("accel"), "%+.1f".format(state.accelMs2), "м/с²",
                 if (state.accelMs2 >= 0f) ColorAccent else ColorWarning))
         }
-        add(CardSpec("map", Icons.Outlined.Compress, "Давление впуска", data.mapKpa?.toString() ?: "—", "кПа"))
-        if (has("vacuum", data.vacuumKpa)) add(CardSpec("vacuum", Icons.Outlined.Compress, "Разрежение", f0(data.vacuumKpa), "кПа"))
-        if (has("maf", data.mafGs)) add(CardSpec("maf", Icons.Outlined.Air, "Расход воздуха", f1(data.mafGs), "г/с"))
+        add(CardSpec("map", Icons.Outlined.Compress, MetricNames.of("map"), data.mapKpa?.toString() ?: "—", "кПа"))
+        if (has("vacuum", data.vacuumKpa)) add(CardSpec("vacuum", Icons.Outlined.Compress, MetricNames.of("vacuum"), f0(data.vacuumKpa), "кПа"))
+        if (has("maf", data.mafGs)) add(CardSpec("maf", Icons.Outlined.Air, MetricNames.of("maf"), f1(data.mafGs), "г/с"))
         // Накат без подачи топлива: форсунки отключены (нагрузка < 8 %, обороты выше
         // холостых, скорость > 15 км/ч, дроссель закрыт). Открывает график нагрузки.
         if (data.fuelCutoffActive) add(CardSpec("load", Icons.Outlined.Eco, "Накат без топлива", "Да",
@@ -217,9 +218,9 @@ private fun buildCardGroups(state: DashboardUiState): List<Pair<String, List<Car
 
     val diagnostics = buildList {
         if ((data.distanceMilKm ?: 0) > 0 || state.histories["distmil"]?.values?.any { it > 0f } == true) {
-            add(CardSpec("distmil", Icons.Outlined.Route, "С Check Engine", data.distanceMilKm?.toString() ?: "—", "км", ColorWarning))
+            add(CardSpec("distmil", Icons.Outlined.Route, MetricNames.of("distmil"), data.distanceMilKm?.toString() ?: "—", "км", ColorWarning))
         }
-        if (has("distclear", data.distanceSinceClearKm)) add(CardSpec("distclear", Icons.Outlined.Route, "После сброса ошибок",
+        if (has("distclear", data.distanceSinceClearKm)) add(CardSpec("distclear", Icons.Outlined.Route, MetricNames.of("distclear"),
             data.distanceSinceClearKm?.toString() ?: "—", "км"))
     }
 

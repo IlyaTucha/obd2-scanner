@@ -63,16 +63,28 @@ class OBDRepositoryImpl @Inject constructor(
 
     // Последний полный снимок — нужен чтобы "медленные" PID не обнулялись между
     // быстрыми циклами. Каждый fast-цикл копируем сюда обновлённые горячие PID,
-    // slow-цикл (раз в SLOW_EVERY) — обновляет всё остальное.
+    // slow-группа (одна за цикл, см. SLOW_GROUPS) — обновляет остальное.
     @Volatile
     private var lastSnapshot: OBDData = OBDData()
     private val cacheLock = Any()
 
-    // Каждый N-й цикл читаем "медленные" PID — температуры, бортсеть, бак,
-    // одометры, trims, oil, баро, ambient. Они меняются редко, и держать их
-    // синхронно с RPM/throttle — терять отзывчивость по педали газа.
+    /** Суффикс «1» к Mode 01: ELM отдаёт ответ сразу после первого ЭБУ, а не ждёт
+     *  таймаут на случай второго. Без него каждый PID стоит лишние 100–200 мс.
+     *  Включается, только если адаптер правильно ответил на пробный запрос
+     *  (см. probeSingleResponse) — часть клонов на такую команду отвечает «?». */
+    @Volatile
+    private var pidSuffix = ""
+
+    private fun pid(command: String) = command + pidSuffix
+
+    // "Медленные" PID — температуры, бортсеть, бак, одометры, trims, oil, ambient —
+    // меняются редко. Читаем их группами по очереди: каждый цикл — одну группу из
+    // SLOW_GROUPS, чтобы цикл оставался коротким и скорость с оборотами обновлялись
+    // равномерно.
     private companion object {
-        const val SLOW_EVERY = 5
+        const val SLOW_GROUPS = 5
+        /** slowGroup для первого снимка: читаем все медленные PID разом. */
+        const val ALL_GROUPS = -1
         /** Пауза между снимками. Сам снимок (5 «горячих» PID) занимает 100–300 мс,
          *  так что итоговая частота 3–7 Гц; пауза лишь даёт адаптеру передышку. */
         const val POLL_PAUSE_MS = 50L
@@ -118,7 +130,16 @@ class OBDRepositoryImpl @Inject constructor(
         // первое же значение пройдёт без подтверждения.
         val dtS = ((now - speedAcceptedAt) / 1000f).coerceAtLeast(0.05f)
         val maxDelta = (MAX_SPEED_DELTA_KMH_PER_S * dtS).coerceAtLeast(MIN_SPEED_DELTA_KMH)
-        if (kotlin.math.abs(v - last) <= maxDelta || confirmed) return accept()
+        if (kotlin.math.abs(v - last) <= maxDelta) return accept()
+        // Сбой старшего бита: 17 км/ч приходит как 0x91 = 145, и так несколько секунд
+        // подряд — подтверждение такой выброс не отсеивает. Если без старшего бита
+        // значение достижимо, а с ним нет, — это та же скорость с битой единицей.
+        val masked = v and 0x7F
+        if (v > 0x7F && kotlin.math.abs(masked - last) <= maxDelta) {
+            speedAccepted = masked; speedAcceptedAt = now; speedPending = null
+            return masked
+        }
+        if (confirmed) return accept()
         speedPending = v
         return last
     }
@@ -350,8 +371,8 @@ class OBDRepositoryImpl @Inject constructor(
             // не «протекали» в новый снимок.
             synchronized(cacheLock) { lastSnapshot = OBDData() }
             speedAccepted = null; speedPending = null
+            probeSingleResponse()
             while (isActive) {
-                val isSlowTick = (cycle % SLOW_EVERY == 0)
                 val snapshot = readSnapshot(
                     displacementL = displacementL,
                     fuel = fuel,
@@ -359,7 +380,8 @@ class OBDRepositoryImpl @Inject constructor(
                     maxPowerKw = maxPowerKw,
                     idleTopRpm = idleTopRpm,
                     coolantTargetC = coolantTargetC,
-                    includeSlow = isSlowTick,
+                    // Первый цикл читает всё сразу, чтобы плитки не стояли с «—».
+                    slowGroup = if (cycle == 0) ALL_GROUPS else cycle % SLOW_GROUPS,
                 )
                 _liveData.tryEmit(snapshot)
                 cycle++
@@ -501,10 +523,11 @@ class OBDRepositoryImpl @Inject constructor(
 
     /**
      * Тиринг поллинга:
-     *  - "Горячие" PID (RPM, скорость, дроссель, нагрузка, MAP) — каждый цикл.
+     *  - "Горячие" PID (RPM, скорость, дроссель, нагрузка, MAP, MAF, fuel rate) — каждый цикл.
      *  - "Медленные" PID (температуры, бортсеть, бак, одометры, trims, oil,
-     *    ambient, MAF, fuel rate, timing) — раз в SLOW_EVERY циклов.
-     * Между slow-циклами медленные значения берутся из кэша lastSnapshot, чтобы UI
+     *    ambient, timing) — по группам, одна группа `slowGroup` за цикл
+     *    (ALL_GROUPS — все сразу).
+     * Между чтениями своей группы медленные значения берутся из кэша lastSnapshot, чтобы UI
      * показывал последнее известное значение (а не "—" или 0). Расчётные метрики
      * (мощность, момент, вакуум, прогрев, CO2, cut-off) считаются здесь же.
      */
@@ -515,74 +538,49 @@ class OBDRepositoryImpl @Inject constructor(
         maxPowerKw: Float,
         idleTopRpm: Float,
         coolantTargetC: Float,
-        includeSlow: Boolean,
+        slowGroup: Int,
     ): OBDData = ioMutex.withLock {
         val cached = synchronized(cacheLock) { lastSnapshot }
 
         // ── HOT TIER (каждый цикл) ────────────────────────────────────────────
-        val speed = sanitizeSpeed(ifSupported("0D") { OBDParser.parseSpeed(bt.sendRaw(OBDCommand.SPEED.command)) })
-        val rpm = ifSupported("0C") { OBDParser.parseRpm(bt.sendRaw(OBDCommand.RPM.command)) }
-        val throttle = ifSupported("11") { OBDParser.parseThrottle(bt.sendRaw(OBDCommand.THROTTLE.command)) }
-        val load = ifSupported("04") { OBDParser.parseEngineLoad(bt.sendRaw(OBDCommand.ENGINE_LOAD.command)) }
-        val mapKpa = ifSupported("0B") { OBDParser.parseMapPressure(bt.sendRaw(OBDCommand.INTAKE_MAP.command)) }
+        val speed = sanitizeSpeed(ifSupported("0D") { OBDParser.parseSpeed(bt.sendRaw(pid(OBDCommand.SPEED.command))) })
+        val rpm = ifSupported("0C") { OBDParser.parseRpm(bt.sendRaw(pid(OBDCommand.RPM.command))) }
+        val throttle = ifSupported("11") { OBDParser.parseThrottle(bt.sendRaw(pid(OBDCommand.THROTTLE.command))) }
+        val load = ifSupported("04") { OBDParser.parseEngineLoad(bt.sendRaw(pid(OBDCommand.ENGINE_LOAD.command))) }
+        val mapKpa = ifSupported("0B") { OBDParser.parseMapPressure(bt.sendRaw(pid(OBDCommand.INTAKE_MAP.command))) }
+        // MAF и PID 5E — основа мгновенного расхода и мощности, поэтому тоже каждый цикл.
+        // Если ЭБУ их не отдаёт (Accent MC), ifSupported пропускает запрос даром.
+        val maf = ifSupported("10") { OBDParser.parseMaf(bt.sendRaw(pid(OBDCommand.MAF.command))) }
+        val fuelRateLh = ifSupported("5E") { OBDParser.parseFuelRateLPerH(bt.sendRaw(pid(OBDCommand.FUEL_RATE.command))) }
 
-        // ── SLOW TIER (каждые SLOW_EVERY циклов) ──────────────────────────────
-        val intake: Int?
-        val maf: Float?
-        val fuelLvl: Float?
-        val battery: Float?
-        val timing: Float?
-        val fuelRateLh: Float?
-        val oilTemp: Int?
-        val coolant: Int?
-        val stft1: Float?
-        val ltft1: Float?
-        val distMil: Int?
-        val distClear: Int?
-        val ambient: Int?
-        if (includeSlow) {
-            // Если slow-чтение разово не вернуло значение — оставляем кэшированное,
-            // чтобы UI не моргал из-за единичного NO DATA от шины. Полный «обнул» произойдёт
-            // только после disconnect (см. startPolling: lastSnapshot = OBDData()).
-            coolant = ifSupported("05") { OBDParser.parseCoolantTemp(bt.sendRaw(OBDCommand.COOLANT_TEMP.command)) } ?: cached.coolantTempC
-            intake = ifSupported("0F") { OBDParser.parseIntakeTemp(bt.sendRaw(OBDCommand.INTAKE_TEMP.command)) } ?: cached.intakeTempC
-            maf = ifSupported("10") { OBDParser.parseMaf(bt.sendRaw(OBDCommand.MAF.command)) } ?: cached.mafGs
-            fuelLvl = ifSupported("2F") { OBDParser.parseFuelLevel(bt.sendRaw(OBDCommand.FUEL_LEVEL.command)) } ?: cached.fuelLevelPercent
-            // Бортсеть: сначала PID 0142 (если ECU отдаёт), иначе ATRV — оно работает всегда
-            // на стороне самого адаптера. На Hyundai Accent MC PID 42 обычно отсутствует.
-            battery = (ifSupported("42") {
-                OBDParser.parseBatteryVoltage(bt.sendRaw(OBDCommand.BATTERY_VOLTAGE.command))
+        // ── SLOW TIER (одна группа за цикл) ───────────────────────────────────
+        // Если slow-чтение разово не вернуло значение — оставляем кэшированное,
+        // чтобы UI не моргал из-за единичного NO DATA от шины. Полный «обнул» произойдёт
+        // только после disconnect (см. startPolling: lastSnapshot = OBDData()).
+        fun due(group: Int) = slowGroup == ALL_GROUPS || slowGroup == group
+        val coolant = slowPid(due(0), "05", cached.coolantTempC) { OBDParser.parseCoolantTemp(bt.sendRaw(pid(OBDCommand.COOLANT_TEMP.command))) }
+        val intake = slowPid(due(0), "0F", cached.intakeTempC) { OBDParser.parseIntakeTemp(bt.sendRaw(pid(OBDCommand.INTAKE_TEMP.command))) }
+        // Бортсеть: сначала PID 0142 (если ECU отдаёт), иначе ATRV — оно работает всегда
+        // на стороне самого адаптера. На Hyundai Accent MC PID 42 обычно отсутствует.
+        val battery = if (due(1)) {
+            (ifSupported("42") {
+                OBDParser.parseBatteryVoltage(bt.sendRaw(pid(OBDCommand.BATTERY_VOLTAGE.command)))
             } ?: runCatching {
                 OBDParser.parseAtRv(bt.sendRaw(com.obd2monitor.data.obd.ELMAtCommand.READ_VOLTAGE))
             }.getOrNull()) ?: cached.batteryVoltage
-            timing = ifSupported("0E") { OBDParser.parseTimingAdvance(bt.sendRaw(OBDCommand.TIMING_ADVANCE.command)) } ?: cached.ignitionTimingDeg
-            fuelRateLh = ifSupported("5E") { OBDParser.parseFuelRateLPerH(bt.sendRaw(OBDCommand.FUEL_RATE.command)) }
-            oilTemp = ifSupported("5C") { OBDParser.parseOilTemp(bt.sendRaw(OBDCommand.OIL_TEMP.command)) } ?: cached.oilTempC
-            stft1 = ifSupported("06") { OBDParser.parseShortFuelTrim1(bt.sendRaw("0106")) } ?: cached.shortFuelTrim1Pct
-            ltft1 = ifSupported("07") { OBDParser.parseLongFuelTrim1(bt.sendRaw("0107")) } ?: cached.longFuelTrim1Pct
-            distMil = ifSupported("21") { OBDParser.parseDistanceWithMil(bt.sendRaw(OBDCommand.DISTANCE_WITH_MIL.command)) } ?: cached.distanceMilKm
-            distClear = ifSupported("31") { OBDParser.parseDistanceSinceClear(bt.sendRaw(OBDCommand.DISTANCE_SINCE_CLEAR.command)) } ?: cached.distanceSinceClearKm
-            ambient = ifSupported("46") { OBDParser.parseAmbientTemp(bt.sendRaw(OBDCommand.AMBIENT_TEMP.command)) } ?: cached.ambientTempC
-        } else {
-            // Между slow-тиками подставляем кэш, чтобы UI не моргал.
-            coolant = cached.coolantTempC
-            intake = cached.intakeTempC
-            maf = cached.mafGs
-            fuelLvl = cached.fuelLevelPercent
-            battery = cached.batteryVoltage
-            timing = cached.ignitionTimingDeg
-            fuelRateLh = null  // пересчитаем расход через свежий MAF/MAP, см. ниже
-            oilTemp = cached.oilTempC
-            stft1 = cached.shortFuelTrim1Pct
-            ltft1 = cached.longFuelTrim1Pct
-            distMil = cached.distanceMilKm
-            distClear = cached.distanceSinceClearKm
-            ambient = cached.ambientTempC
-        }
+        } else cached.batteryVoltage
+        val timing = slowPid(due(1), "0E", cached.ignitionTimingDeg) { OBDParser.parseTimingAdvance(bt.sendRaw(pid(OBDCommand.TIMING_ADVANCE.command))) }
+        val fuelLvl = slowPid(due(2), "2F", cached.fuelLevelPercent) { OBDParser.parseFuelLevel(bt.sendRaw(pid(OBDCommand.FUEL_LEVEL.command))) }
+        val oilTemp = slowPid(due(2), "5C", cached.oilTempC) { OBDParser.parseOilTemp(bt.sendRaw(pid(OBDCommand.OIL_TEMP.command))) }
+        val stft1 = slowPid(due(3), "06", cached.shortFuelTrim1Pct) { OBDParser.parseShortFuelTrim1(bt.sendRaw(pid("0106"))) }
+        val ltft1 = slowPid(due(3), "07", cached.longFuelTrim1Pct) { OBDParser.parseLongFuelTrim1(bt.sendRaw(pid("0107"))) }
+        val distMil = slowPid(due(4), "21", cached.distanceMilKm) { OBDParser.parseDistanceWithMil(bt.sendRaw(pid(OBDCommand.DISTANCE_WITH_MIL.command))) }
+        val distClear = slowPid(due(4), "31", cached.distanceSinceClearKm) { OBDParser.parseDistanceSinceClear(bt.sendRaw(pid(OBDCommand.DISTANCE_SINCE_CLEAR.command))) }
+        val ambient = slowPid(due(4), "46", cached.ambientTempC) { OBDParser.parseAmbientTemp(bt.sendRaw(pid(OBDCommand.AMBIENT_TEMP.command))) }
 
-        // Расход: предпочитаем PID 5E (если был свежий из slow-тика), иначе MAF, иначе
-        // MAP+RPM. Между slow-тиками MAP/RPM свежие, intake берём из кэша — расход
-        // пересчитывается каждый цикл, чтобы график не "ступенчатил".
+        // Расход: предпочитаем PID 5E, иначе MAF, иначе MAP+RPM. Intake между чтениями
+        // его группы берём из кэша — расход пересчитывается каждый цикл, чтобы график
+        // не "ступенчатил".
         val instantLh = when {
             fuelRateLh != null && fuelRateLh > 0f -> fuelRateLh
             maf != null && maf > 0f -> FuelCalculator.fromMAF(maf, fuel)
@@ -657,6 +655,21 @@ class OBDRepositoryImpl @Inject constructor(
         snapshot
     }
 
+    /** Медленный PID: читаем, только если подошла его группа, иначе — значение из кэша. */
+    private inline fun <T> slowPid(due: Boolean, pid: String, cached: T?, block: () -> T?): T? =
+        if (due) ifSupported(pid, block) ?: cached else cached
+
+    /**
+     * Пробный запрос оборотов с суффиксом «1» (ждать один ответ). Валидный ответ —
+     * включаем суффикс для всего Mode 01; «?», NO DATA или ошибка — опрашиваем без
+     * суффикса. Проверяется на каждом подключении: адаптер могли сменить.
+     */
+    private suspend fun probeSingleResponse() = ioMutex.withLock {
+        pidSuffix = ""
+        val ok = runCatching { OBDParser.parseRpm(bt.sendRaw(OBDCommand.RPM.command + "1")) }.getOrNull() != null
+        if (ok) pidSuffix = "1"
+    }
+
     private inline fun <T> ifSupported(pid: String, block: () -> T?): T? {
         // Если кэш PID-маски пуст, считаем что любой PID может быть запрошен (best-effort).
         if (pids.all().isNotEmpty() && !pids.isSupported(pid)) return null
@@ -716,7 +729,7 @@ class OBDRepositoryImpl @Inject constructor(
         val values = mutableListOf<Pair<String, String>>()
         data(0x0C)?.takeIf { it.size >= 2 }?.let { values += "Обороты" to "${(it[0] * 256 + it[1]) / 4} об/мин" }
         data(0x0D)?.let { values += "Скорость" to "${it[0]} км/ч" }
-        data(0x05)?.let { values += "Охлаждающая жидкость" to "${it[0] - 40} °C" }
+        data(0x05)?.let { values += "Антифриз" to "${it[0] - 40} °C" }
         data(0x04)?.let { values += "Нагрузка" to "%.0f %%".format(it[0] * 100f / 255f) }
         data(0x0B)?.let { values += "Давление впуска" to "${it[0]} кПа" }
         data(0x06)?.let { values += "Краткая коррекция" to "%+.1f %%".format((it[0] - 128) * 100f / 128f) }

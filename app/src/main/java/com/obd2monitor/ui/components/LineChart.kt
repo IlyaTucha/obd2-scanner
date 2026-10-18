@@ -11,6 +11,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -27,10 +28,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.obd2monitor.ui.theme.ColorAccent
 import com.obd2monitor.ui.theme.ColorTextSecondary
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 /**
  * Полноразмерный line chart с засечками по осям, подписями min/max/mid и градиентной заливкой.
- * Y-ось — числовые значения; X-ось — относительное время (от старта к концу серии).
+ * Y-ось — числовые значения; X-ось — время замеров ([pointTimes]) или доля ряда в %.
  *
  * Жесты: двупальцевое pinch — зум по оси времени; однопальцевое перетаскивание —
  * pan; короткий тап — выбор ближайшей точки (показывается tooltip с её значением).
@@ -68,6 +72,14 @@ fun LineChart(
     resetSelectionKey: Any? = null,
     /** Комментарии к точкам (длина == values.size): непустой показывается второй строкой подсказки. */
     pointNotes: List<String>? = null,
+    /**
+     * Время каждой точки, мс (длина == values.size). Тогда по X — часы и минуты
+     * замера (при зуме на короткий отрезок — с секундами), в подсказке — с секундами.
+     * Ось идёт по замерам, а не по часам: паузы записи на ней не растягиваются.
+     */
+    pointTimes: List<Long>? = null,
+    /** Выбрана точка (индекс в [values]) или выделение снято (null). */
+    onPointSelected: ((Int?) -> Unit)? = null,
 ) {
     val density = LocalDensity.current
     val labelPx = with(density) { 10.sp.toPx() }
@@ -113,6 +125,11 @@ fun LineChart(
         return Triple(startIdx, endIdx, total)
     }
 
+    val onSelect by rememberUpdatedState(onPointSelected)
+    LaunchedEffect(selectedWindowIdx) {
+        onSelect?.invoke(if (selectedWindowIdx >= 0) computeWindow().first + selectedWindowIdx else null)
+    }
+
     Canvas(
         modifier = modifier
             .fillMaxSize()
@@ -154,7 +171,7 @@ fun LineChart(
             }
             .pointerInput(values.size) {
                 detectTransformGestures { _, panChange, gestureZoom, _ ->
-                    val newZoom = (zoom * gestureZoom).coerceIn(1f, 8f)
+                    val newZoom = (zoom * gestureZoom).coerceIn(1f, MAX_ZOOM)
                     val widthPx = size.width.coerceAtLeast(1).toFloat()
                     val deltaFrac = -panChange.x / widthPx / newZoom
                     val maxOff = 0.5f - 0.5f / newZoom
@@ -235,6 +252,8 @@ fun LineChart(
         }
 
         // Засечки по X — подписи показывают актуальный диапазон окна, не «0..100%».
+        val times = pointTimes?.takeIf { it.size == values.size }
+        val axisTimeFormat = if (times != null && times[endIdx] - times[startIdx] < SHORT_SPAN_MS) TIME_SEC else TIME_MIN
         for (i in 0..xTicks) {
             val frac = i.toFloat() / xTicks
             val x = plotLeft + plotW * frac
@@ -244,7 +263,10 @@ fun LineChart(
                 end = Offset(x, plotBottom + 4.dp.toPx()),
                 strokeWidth = 1.dp.toPx(),
             )
-            val label = if (xAxisLabels != null && xAxisLabels.size == values.size && values.size >= 2) {
+            val label = if (times != null) {
+                val idxF = startFrac + (endFrac - startFrac) * frac
+                formatTime(times[(idxF * (values.size - 1)).toInt().coerceIn(0, values.size - 1)], axisTimeFormat)
+            } else if (xAxisLabels != null && xAxisLabels.size == values.size && values.size >= 2) {
                 val idxF = startFrac + (endFrac - startFrac) * frac
                 val idx = (idxF * (values.size - 1)).toInt().coerceIn(0, values.size - 1)
                 xAxisLabels[idx]
@@ -333,8 +355,11 @@ fun LineChart(
             // Kotlin не уверен что параметр xAxisLabels не null между двумя
             // обращениями в цепочке.
             val labels = xAxisLabels
-            val xCaption = if (labels != null && labels.size == values.size)
-                labels.getOrNull(originalIdx) else null
+            val xCaption = when {
+                times != null -> times.getOrNull(originalIdx)?.let { formatTime(it, TIME_SEC) }
+                labels != null && labels.size == values.size -> labels.getOrNull(originalIdx)
+                else -> null
+            }
             val text = if (xCaption != null) "${valueFormatter(v)} · $xCaption" else valueFormatter(v)
             val notes = pointNotes
             val note = if (notes != null && notes.size == values.size) {
@@ -404,6 +429,17 @@ fun LineChart(
         }
     }
 }
+
+/** Предел зума по времени: окно в несколько минут даже у многочасовой поездки. */
+private const val MAX_ZOOM = 100f
+
+/** Окно короче этого — на оси нужны секунды, иначе подписи «19:07 19:07 19:08» сливаются. */
+private const val SHORT_SPAN_MS = 10 * 60_000L
+private val TIME_MIN = DateTimeFormatter.ofPattern("HH:mm")
+private val TIME_SEC = DateTimeFormatter.ofPattern("HH:mm:ss")
+
+private fun formatTime(ms: Long, format: DateTimeFormatter): String =
+    format.format(Instant.ofEpochMilli(ms).atZone(ZoneId.systemDefault()))
 
 private fun Color.toArgb(): Int = android.graphics.Color.argb(
     (alpha * 255).toInt().coerceIn(0, 255),

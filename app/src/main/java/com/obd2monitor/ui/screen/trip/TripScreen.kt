@@ -43,6 +43,8 @@ import androidx.compose.material.icons.outlined.MyLocation
 import androidx.compose.material.icons.automirrored.outlined.RotateRight
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Speed
+import androidx.compose.material.icons.outlined.Pause
+import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material.icons.outlined.Thermostat
 import androidx.compose.material.icons.outlined.Timer
@@ -78,6 +80,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.location.LocationManagerCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.obd2monitor.domain.model.MetricNames
 import com.obd2monitor.domain.model.ConnectionState
 import com.obd2monitor.domain.model.Trip
 import com.obd2monitor.service.TripController
@@ -135,7 +138,12 @@ fun TripActiveScreen(
             return@ScreenColumn
         }
 
-        StatusCard(state = state, onFinish = { confirmFinish = true })
+        StatusCard(
+            state = state,
+            onFinish = { confirmFinish = true },
+            onPause = viewModel::pause,
+            onResume = viewModel::resume,
+        )
         val stats = buildStats(state)
         if (wide) {
             // В горизонтали — показатели слева, карта справа.
@@ -258,7 +266,7 @@ private fun IdleCard(isConnected: Boolean, onStartGps: () -> Unit, onOpenSetting
 }
 
 @Composable
-private fun StatusCard(state: TripUiState, onFinish: () -> Unit) {
+private fun StatusCard(state: TripUiState, onFinish: () -> Unit, onPause: () -> Unit, onResume: () -> Unit) {
     val connected = state.connection.state == ConnectionState.CONNECTED
     val obdFlowing = connected && state.connection.lastSnapshotHadData
     val now = System.currentTimeMillis()
@@ -268,6 +276,9 @@ private fun StatusCard(state: TripUiState, onFinish: () -> Unit) {
     val paused = if (state.gpsMode) state.paused else state.paused || !obdFlowing
 
     val (color, title, hint) = when {
+        state.manualPause -> Triple(ColorWarning, "Пауза",
+            if (state.gpsMode) "Поездка не завершится сама. Запись продолжится, когда автомобиль поедет, или по кнопке «Продолжить»."
+            else "Поездка не завершится сама. Запись продолжится при следующем запуске двигателя или по кнопке «Продолжить».")
         state.gpsMode && paused -> Triple(ColorWarning, "Пауза: стоянка",
             "Запись возобновится автоматически, когда автомобиль поедет.")
         waitingGps -> Triple(ColorWarning, "Ожидание сигнала GPS",
@@ -304,9 +315,9 @@ private fun StatusCard(state: TripUiState, onFinish: () -> Unit) {
         )
         Spacer(Modifier.height(10.dp))
         Text(hint, color = ColorTextSecondary, style = MaterialTheme.typography.bodySmall)
-        // Обратный отсчёт до авто-завершения долгой паузы.
+        // Обратный отсчёт до авто-завершения долгой автопаузы; ручная пауза не ограничена.
         val pauseSince = state.pauseSinceMs
-        if (paused && pauseSince != null) {
+        if (paused && !state.manualPause && pauseSince != null) {
             val remainingMs = (TripController.AUTO_FINISH_PAUSE_MS - (now - pauseSince)).coerceAtLeast(0L)
             Text(
                 "Если запись не возобновится, сессия завершится автоматически через ${formatPauseRemaining(remainingMs)}.",
@@ -315,10 +326,21 @@ private fun StatusCard(state: TripUiState, onFinish: () -> Unit) {
             )
         }
         Spacer(Modifier.height(12.dp))
-        OutlinedButton(onClick = onFinish, modifier = Modifier.fillMaxWidth()) {
-            Icon(Icons.Outlined.Stop, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(6.dp))
-            Text("Завершить")
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(onClick = if (state.manualPause) onResume else onPause, modifier = Modifier.weight(1f)) {
+                Icon(
+                    if (state.manualPause) Icons.Outlined.PlayArrow else Icons.Outlined.Pause,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(if (state.manualPause) "Продолжить" else "Пауза")
+            }
+            OutlinedButton(onClick = onFinish, modifier = Modifier.weight(1f)) {
+                Icon(Icons.Outlined.Stop, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Завершить")
+            }
         }
     }
 }
@@ -373,17 +395,17 @@ private fun buildStats(state: TripUiState): List<LiveStat> = buildList {
     if (s.fuelLiters > 0.001f) add(LiveStat(Icons.Outlined.LocalGasStation, "Топливо за сессию", "%.2f".format(s.fuelLiters), "л"))
     // Расход: на ходу — л/100 км, на стоянке — л/ч (как бортовой компьютер).
     if ((live.speedKmh ?: 0f) > 5f && live.instantFuelLPer100 != null) {
-        add(LiveStat(Icons.Outlined.LocalGasStation, "Расход сейчас", "%.1f".format(live.instantFuelLPer100), "л/100 км"))
+        add(LiveStat(Icons.Outlined.LocalGasStation, MetricNames.of("fuelh"), "%.1f".format(live.instantFuelLPer100), "л/100 км"))
     } else if (live.instantFuelLPerH != null) {
-        add(LiveStat(Icons.Outlined.LocalGasStation, "Расход сейчас", "%.1f".format(live.instantFuelLPerH), "л/ч"))
+        add(LiveStat(Icons.Outlined.LocalGasStation, MetricNames.of("fuelh"), "%.1f".format(live.instantFuelLPerH), "л/ч"))
     }
-    live.fuelLevelPercent?.let { add(LiveStat(Icons.Outlined.LocalGasStation, "Топливо в баке", "%.0f".format(it), "%")) }
-    live.rpm?.let { add(LiveStat(Icons.AutoMirrored.Outlined.RotateRight, "Обороты", it.toString(), "об/мин")) }
-    live.engineLoadPercent?.let { add(LiveStat(Icons.Outlined.Memory, "Нагрузка", "%.0f".format(it), "%")) }
-    live.throttlePercent?.let { add(LiveStat(Icons.Outlined.Tune, "Дроссель", "%.0f".format(it), "%")) }
-    live.coolantTempC?.let { add(LiveStat(Icons.Outlined.Thermostat, "Охлаждающая жидкость", it.toString(), "°C")) }
-    live.intakeTempC?.let { add(LiveStat(Icons.Outlined.Air, "Воздух на впуске", it.toString(), "°C")) }
-    live.batteryVoltage?.let { add(LiveStat(Icons.Outlined.BatteryFull, "Бортсеть", "%.2f".format(it), "В")) }
+    live.fuelLevelPercent?.let { add(LiveStat(Icons.Outlined.LocalGasStation, MetricNames.of("fuellevel"), "%.0f".format(it), "%")) }
+    live.rpm?.let { add(LiveStat(Icons.AutoMirrored.Outlined.RotateRight, MetricNames.of("rpm"), it.toString(), "об/мин")) }
+    live.engineLoadPercent?.let { add(LiveStat(Icons.Outlined.Memory, MetricNames.of("load"), "%.0f".format(it), "%")) }
+    live.throttlePercent?.let { add(LiveStat(Icons.Outlined.Tune, MetricNames.of("throttle"), "%.0f".format(it), "%")) }
+    live.coolantTempC?.let { add(LiveStat(Icons.Outlined.Thermostat, MetricNames.of("coolant"), it.toString(), "°C")) }
+    live.intakeTempC?.let { add(LiveStat(Icons.Outlined.Air, MetricNames.of("intake"), it.toString(), "°C")) }
+    live.batteryVoltage?.let { add(LiveStat(Icons.Outlined.BatteryFull, MetricNames.of("battery"), "%.2f".format(it), "В")) }
 }
 
 @Composable

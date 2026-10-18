@@ -20,6 +20,9 @@ interface TripRepository {
     suspend fun startTrip(vehicleProfileId: String): String
     suspend fun appendReading(reading: OBDReading)
     suspend fun finishTrip(tripId: String)
+    /** Пересчитать завершённые поездки, у которых время окончания включает хвост паузы
+     *  после последнего замера (см. finishTrip). Повторный вызов ничего не меняет. */
+    suspend fun trimTrailingPauses()
     suspend fun deleteTrip(tripId: String)
     /** Инкрементальное накопление паузы — пишется TripController'ом раз в ~5 с. */
     suspend fun addPausedMs(tripId: String, deltaMs: Long)

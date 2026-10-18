@@ -80,10 +80,31 @@ object ReadingMetrics {
         else -> null
     }
 
-    /** Ряд значений [key] по замерам поездки. Ускорение считается по соседним точкам. */
-    fun series(key: String, readings: List<OBDReading>, profile: VehicleProfile?): List<Float> =
-        if (key == "accel") TripMath.accelSeries(readings)
-        else readings.map { value(key, it, profile) ?: 0f }
+    /** Замер с данными ЭБУ. Пока адаптер не на связи, сервис пишет только GPS, а поля
+     *  двигателя — нулями-заглушками; в статистику двигателя такие замеры не берём. */
+    fun hasEngineData(r: OBDReading): Boolean =
+        r.rpm > 0f || r.coolantTempC != 0f || r.batteryVoltage > 0f || r.mapKpa > 0f || r.engineLoadPercent > 0f
+
+    /** Ряд значений [key] по замерам поездки. Ускорение считается по соседним точкам.
+     *  Скорость есть и в GPS-замерах, остальное — только в замерах с ЭБУ. */
+    fun series(key: String, readings: List<OBDReading>, profile: VehicleProfile?): List<Float> = when (key) {
+        "accel" -> TripMath.accelSeries(readings)
+        "speed" -> readings.map { it.speedKmh }
+        "stops" -> TripMath.stopSeries(readings)
+        else -> readings.filter(::hasEngineData).map { value(key, it, profile) ?: 0f }
+    }
+
+    /** Ехала ли машина в каждой точке [series] — для «Сред. на ходу». */
+    fun seriesMoving(key: String, readings: List<OBDReading>): List<Boolean> = when (key) {
+        "accel", "speed", "stops" -> readings
+        else -> readings.filter(::hasEngineData)
+    }.map { it.speedKmh >= TripMath.MOVING_THRESHOLD_KMH }
+
+    /** Время каждой точки [series] — для подписей оси X. */
+    fun seriesTimes(key: String, readings: List<OBDReading>): List<Long> = when (key) {
+        "accel", "speed", "stops" -> readings.map { it.timestamp }
+        else -> readings.filter(::hasEngineData).map { it.timestamp }
+    }
 }
 
 /** Общая математика поездки: пробег, движение, ускорение. */
@@ -100,6 +121,29 @@ object TripMath {
         return if (dt <= 0L || dt > MAX_GAP_MS) 0f else dt / 3_600_000f
     }
 
+    /** Время без записи, мс: от старта до первого замера и разрывы между замерами
+     *  длиннее MAX_GAP_MS. Это паузы, видные по самим замерам. */
+    fun recordedGapsMs(readings: List<OBDReading>, startTime: Long): Long {
+        if (readings.isEmpty()) return 0L
+        var ms = (readings.first().timestamp - startTime).takeIf { it > MAX_GAP_MS } ?: 0L
+        for (i in 1 until readings.size) {
+            val dt = readings[i].timestamp - readings[i - 1].timestamp
+            if (dt > MAX_GAP_MS) ms += dt
+        }
+        return ms
+    }
+
+    /** Время, когда запись шла, мс: сумма отрезков между соседними замерами не длиннее
+     *  MAX_GAP_MS. Дополнение к [recordedGapsMs]. */
+    fun recordedSpanMs(readings: List<OBDReading>): Long {
+        var ms = 0L
+        for (i in 1 until readings.size) {
+            val dt = readings[i].timestamp - readings[i - 1].timestamp
+            if (dt in 1..MAX_GAP_MS) ms += dt
+        }
+        return ms
+    }
+
     fun distanceKm(readings: List<OBDReading>): Float {
         var km = 0f
         for (i in 1 until readings.size) {
@@ -107,6 +151,49 @@ object TripMath {
             km += (readings[i - 1].speedKmh + readings[i].speedKmh) / 2f * h
         }
         return km
+    }
+
+    /** Стоянка короче этого — притормозил в потоке, а не остановка. */
+    const val MIN_STOP_MS = 10_000L
+
+    data class Stop(val startMs: Long, val endMs: Long) {
+        val durationMs: Long get() = endMs - startMs
+    }
+
+    /**
+     * Остановки за время записи: подряд идущие замеры со скоростью ниже
+     * MOVING_THRESHOLD_KMH, не короче MIN_STOP_MS. Конец — первый замер, где машина
+     * поехала. Разрыв записи (пауза) обрывает остановку: время паузы — не стоянка.
+     */
+    fun stops(readings: List<OBDReading>): List<Stop> {
+        val out = mutableListOf<Stop>()
+        var start: Long? = null
+        var end = 0L
+        fun close() {
+            val s = start ?: return
+            if (end - s >= MIN_STOP_MS) out += Stop(s, end)
+            start = null
+        }
+        readings.forEachIndexed { i, r ->
+            if (i > 0 && r.timestamp - readings[i - 1].timestamp > MAX_GAP_MS) close()
+            end = r.timestamp
+            if (r.speedKmh < MOVING_THRESHOLD_KMH) {
+                if (start == null) start = r.timestamp
+            } else close()
+        }
+        close()
+        return out
+    }
+
+    /** 1 — замер внутри остановки, 0 — машина едет. Для графика «Остановки». */
+    fun stopSeries(readings: List<OBDReading>): List<Float> {
+        val stops = stops(readings)
+        var k = 0
+        return readings.map { r ->
+            while (k < stops.size && stops[k].endMs < r.timestamp) k++
+            val s = stops.getOrNull(k)
+            if (s != null && r.timestamp >= s.startMs && r.timestamp < s.endMs) 1f else 0f
+        }
     }
 
     /** Ускорение (м/с²) в каждой точке по окну из 5 последних замеров. */

@@ -3,6 +3,7 @@ package com.obd2monitor
 import android.app.Application
 import com.obd2monitor.data.database.AppDatabase
 import com.obd2monitor.data.database.Seeder
+import com.obd2monitor.domain.repository.TripRepository
 import com.obd2monitor.service.AutoSessionManager
 import com.yandex.mapkit.MapKitFactory
 import dagger.hilt.android.HiltAndroidApp
@@ -21,6 +22,7 @@ class OBDApplication : Application() {
 
     @Inject lateinit var db: AppDatabase
     @Inject lateinit var autoSession: AutoSessionManager
+    @Inject lateinit var tripRepo: TripRepository
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -41,6 +43,7 @@ class OBDApplication : Application() {
             backupDatabase()
             // После бэкапа — чтобы удалённое осталось хотя бы в копии.
             runCatching { db.tripDao().deleteOrphanReadings() }
+            runCatching { tripRepo.trimTrailingPauses() }
         }
     }
 

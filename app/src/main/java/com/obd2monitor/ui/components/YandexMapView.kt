@@ -58,6 +58,8 @@ fun YandexMapView(
     points: List<GeoPoint>,
     modifier: Modifier = Modifier,
     emptyText: String = "Маршрут появится после первых точек GPS",
+    /** Красный маркер «машина была здесь»; камера переезжает к нему. */
+    highlight: GeoPoint? = null,
 ) {
     if (BuildConfig.YANDEX_API_KEY.isBlank() || points.isEmpty()) {
         Box(modifier.background(ColorCard).padding(16.dp), contentAlignment = Alignment.Center) {
@@ -126,6 +128,7 @@ fun YandexMapView(
         update = {
             mapView.visibility = if (shown) View.VISIBLE else View.INVISIBLE
             route.render(points)
+            route.highlight(highlight)
         },
     )
 }
@@ -148,6 +151,32 @@ private class RouteLayer(private val mapView: MapView) {
     private var finish: PlacemarkMapObject? = null
     private var renderedPoints: List<GeoPoint>? = null
     private var cameraFitted = false
+    private var marker: PlacemarkMapObject? = null
+    private var highlighted: GeoPoint? = null
+
+    fun highlight(p: GeoPoint?) {
+        if (p == highlighted) return
+        highlighted = p
+        val m = marker
+        if (p == null) {
+            m?.isVisible = false
+            return
+        }
+        val pt = Point(p.latitude, p.longitude)
+        val mk = m ?: mapView.mapWindow.map.mapObjects.addPlacemark(pt).also {
+            it.setIcon(dot(HIGHLIGHT_COLOR, size = 48), IconStyle())
+            it.zIndex = 10f
+            marker = it
+        }
+        mk.geometry = pt
+        mk.isVisible = true
+        // Сразу после создания у карты нулевой размер — ждём разметку, как в fitCamera.
+        mapView.doOnLayout {
+            val map = mapView.mapWindow.map
+            val zoom = map.cameraPosition.zoom.coerceAtLeast(15f)
+            map.move(CameraPosition(pt, zoom, 0f, 0f), Animation(Animation.Type.SMOOTH, 0.3f), null)
+        }
+    }
 
     fun render(points: List<GeoPoint>) {
         if (points === renderedPoints || points.isEmpty()) return
@@ -180,7 +209,8 @@ private class RouteLayer(private val mapView: MapView) {
 
         // Камеру подгоняем после разметки: до неё у карты нулевой размер, и
         // вычисленная позиция получалась неверной (маршрут «вне кадра»).
-        mapView.doOnLayout { fitCamera(mk, animate = cameraFitted) }
+        // При выбранной точке камеру держит маркер, а не весь маршрут.
+        mapView.doOnLayout { if (highlighted == null) fitCamera(mk, animate = cameraFitted) }
     }
 
     private fun fitCamera(mk: List<Point>, animate: Boolean) {
@@ -201,18 +231,25 @@ private class RouteLayer(private val mapView: MapView) {
         cameraFitted = true
     }
 
-    private fun dot(color: Int): ImageProvider {
-        val bmp = android.graphics.Bitmap.createBitmap(32, 32, android.graphics.Bitmap.Config.ARGB_8888)
+    private fun dot(color: Int, size: Int = 32): ImageProvider {
+        val bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
         val canvas = android.graphics.Canvas(bmp)
         val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
             this.color = color
             style = android.graphics.Paint.Style.FILL
         }
-        canvas.drawCircle(16f, 16f, 12f, paint)
+        val c = size / 2f
+        val r = size * 0.375f
+        canvas.drawCircle(c, c, r, paint)
         paint.color = 0xFFFFFFFF.toInt()
         paint.style = android.graphics.Paint.Style.STROKE
-        paint.strokeWidth = 3f
-        canvas.drawCircle(16f, 16f, 12f, paint)
+        paint.strokeWidth = size / 10f
+        canvas.drawCircle(c, c, r, paint)
         return ImageProvider.fromBitmap(bmp)
+    }
+
+    private companion object {
+        /** Ярко-красный: на карте не путается ни с линией маршрута, ни со стартом/финишем. */
+        const val HIGHLIGHT_COLOR = 0xFFE53935.toInt()
     }
 }

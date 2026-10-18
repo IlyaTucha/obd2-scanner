@@ -277,6 +277,7 @@ class TripForegroundService : Service() {
     private fun updateGpsIdlePause(now: Long, gpsSpeed: Float) {
         if (gpsSpeed >= GPS_RESUME_SPEED_KMH) {
             stationarySince = null
+            controller.setManualPause(false)
             if (controller.paused.value) controller.setPaused(false)
             return
         }

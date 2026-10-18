@@ -55,6 +55,10 @@ class AutoSessionManager @Inject constructor(
     private var lastState: ConnectionState = ConnectionState.DISCONNECTED
     private var currentTripId: String? = null
     private var started = false
+    /** Во время ручной паузы адаптер отключался (заглушили двигатель). Следующее
+     *  подключение — это новый запуск, и ручная пауза снимается. Без этого флага её
+     *  снимал бы и лёгкий реконнект при работающем двигателе (CONNECTED → … → CONNECTED). */
+    private var manualPauseSawDisconnect = false
 
     companion object {
         /** Если за этот интервал не пришёл ни один валидный snapshot — считаем разрыв и ставим паузу. */
@@ -83,6 +87,14 @@ class AutoSessionManager @Inject constructor(
                 }
                 lastState = state
             }.launchIn(scope)
+            // Ручную паузу снимают и не отсюда (сервис — когда GPS-сессия поехала):
+            // флаг в настройках чистим здесь, в одном месте.
+            controller.manualPause.onEach { manual ->
+                if (!manual) {
+                    manualPauseSawDisconnect = false
+                    prefs.setManualPauseTripId(null)
+                }
+            }.launchIn(scope)
         }
 
         // Watchdog «частичного разрыва»: CONNECTED, но данные не идут >10 c — пауза.
@@ -98,24 +110,44 @@ class AutoSessionManager @Inject constructor(
                 val stale = ageMs > STALE_DATA_THRESHOLD_MS || !s.lastSnapshotHadData
                 if (stale && !controller.paused.value) {
                     controller.setPaused(true)
-                } else if (!stale && controller.paused.value) {
+                } else if (!stale && controller.paused.value && !controller.manualPause.value) {
                     controller.setPaused(false)
                 }
             }
         }
 
-        // Watchdog авто-завершения: сессия в непрерывной паузе дольше 8 ч закрывается,
+        // Watchdog авто-завершения: сессия в непрерывной автопаузе дольше 8 ч закрывается,
         // чтобы пользователь не вернулся через сутки к давно мёртвой «активной» сессии.
+        // Ручную паузу не трогаем: её поставили намеренно (ночёвка, долгая стоянка).
         scope.launch {
             while (isActive) {
                 delay(30_000)
-                if (currentTripId == null) continue
+                if (currentTripId == null || controller.manualPause.value) continue
                 val pauseStart = controller.pauseSinceMs.value ?: continue
                 if (System.currentTimeMillis() - pauseStart >= ORPHAN_MAX_AGE_MS) {
                     runCatching { tripMutex.withLock { closeTripLocked() } }
                 }
             }
         }
+    }
+
+    /** Кнопка «Пауза»: запись останавливается без ограничения по времени. */
+    suspend fun pauseByUser() = tripMutex.withLock {
+        val id = currentTripId ?: return@withLock
+        manualPauseSawDisconnect = obdRepo.connectionStatus.value.state != ConnectionState.CONNECTED
+        controller.setManualPause(true)
+        prefs.setManualPauseTripId(id)
+    }
+
+    /** Кнопка «Продолжить». Если адаптер не на связи, OBD-сессия остаётся на обычной
+     *  автопаузе: её отсчёт до авто-завершения начинается заново, с этого момента. */
+    suspend fun resumeByUser() = tripMutex.withLock {
+        if (currentTripId == null) return@withLock
+        controller.setManualPause(false)
+        controller.setPaused(false)
+        val s = obdRepo.connectionStatus.value
+        val obdFlowing = s.state == ConnectionState.CONNECTED && s.lastSnapshotHadData
+        if (!controller.gpsMode.value && !obdFlowing) controller.setPaused(true)
     }
 
     /** Ручной старт записи по GPS (кнопка на вкладке «Сессия»). */
@@ -165,16 +197,22 @@ class AutoSessionManager @Inject constructor(
                 currentTripId != null -> {
                 if (controller.consumeFinishRequest()) {
                     closeTripLocked()
-                } else if (!controller.gpsMode.value) {
-                    controller.setPaused(true)
+                } else {
+                    if (controller.manualPause.value) manualPauseSawDisconnect = true
+                    if (!controller.gpsMode.value) controller.setPaused(true)
                 }
             }
             // Возврат CONNECTED при уже открытой сессии (только на переходе, не на каждую
             // emission — иначе гонялись бы с watchdog'ом, который ставит паузу по данным).
+            // Ручная пауза держится, пока адаптер не отключался: снимается только при
+            // новом запуске двигателя.
             state == ConnectionState.CONNECTED &&
                 currentTripId != null &&
                 lastState != ConnectionState.CONNECTED -> {
-                controller.setPaused(false)
+                if (!controller.manualPause.value || manualPauseSawDisconnect) {
+                    controller.setManualPause(false)
+                    controller.setPaused(false)
+                }
             }
             else -> Unit
         }
@@ -188,26 +226,30 @@ class AutoSessionManager @Inject constructor(
         stopService()
         tracker.detach()
         prefs.setGpsTripId(null)
+        prefs.setManualPauseTripId(null)
         finishTrip(id)
     }
 
     /** Усыновление осиротевшей сессии: если в БД есть trip с endTime=null, делаем его
      *  активным в памяти, иначе следующий коннект создаст новый trip и старый зависнет.
-     *  Слишком старый (> 8 ч) — закрываем сразу, чтобы не считать простой «паузой». */
+     *  Без записей дольше 8 ч — закрываем сразу, чтобы не считать простой «паузой»;
+     *  поездку на ручной паузе оставляем открытой сколько угодно. */
     private suspend fun adoptOrphanIfAny() {
         val orphan = tripRepo.getActiveTripOnce() ?: return
         val gpsTripId = prefs.gpsTripId.first()
+        val manual = prefs.manualPauseTripId.first() == orphan.id
         val now = System.currentTimeMillis()
         val ageMs = now - orphan.startTime
-        if (ageMs > ORPHAN_MAX_AGE_MS) {
+        val lastReadingTs = tripRepo.lastReadingTimestamp(orphan.id)
+        if (!manual && now - (lastReadingTs ?: orphan.startTime) > ORPHAN_MAX_AGE_MS) {
             finishTrip(orphan.id)
             prefs.setGpsTripId(null)
+            prefs.setManualPauseTripId(null)
             return
         }
         // Простой между последней записью и текущим моментом — это время, когда
         // приложение было убито. Записей не было — засчитываем как паузу, иначе UI
         // покажет «активный» интервал, в котором на самом деле записано 0 точек.
-        val lastReadingTs = tripRepo.lastReadingTimestamp(orphan.id)
         val downtimeMs = lastReadingTs?.let { (now - it).coerceAtLeast(0L) } ?: ageMs
         if (downtimeMs > 1_000L) tripRepo.addPausedMs(orphan.id, downtimeMs)
         val adopted = tripRepo.getActiveTripOnce()
@@ -217,7 +259,11 @@ class AutoSessionManager @Inject constructor(
             startTime = orphan.startTime,
             pausedMsSoFar = adopted?.pausedMs ?: orphan.pausedMs,
             gpsMode = orphan.id == gpsTripId,
+            manualPause = manual,
         )
+        // Процесс перезапущен — адаптер заведомо отключён, следующее подключение
+        // снимет ручную паузу.
+        manualPauseSawDisconnect = manual
         startService()
     }
 
