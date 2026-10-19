@@ -15,6 +15,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.zip.GZIPOutputStream
 import javax.inject.Inject
 
 @HiltAndroidApp
@@ -53,14 +54,18 @@ class OBDApplication : Application() {
      * последние запуски — раньше десять перезапусков за вечер вытесняли все
      * вчерашние копии). Перед копированием журнал WAL вливается в основной файл:
      * без этого последние записи оставались в -wal и в копию не попадали.
-     * Ошибки глотаем — бэкап best-effort и не должен ломать запуск.
+     * Копия сжата gzip (в разы меньше базы); для восстановления её распаковывают
+     * в .db. Пишется во временный файл, чтобы оборванная запись не вытеснила
+     * целую копию. Ошибки глотаем — бэкап best-effort и не должен ломать запуск.
      */
     private fun backupDatabase() {
         runCatching {
             val src = getDatabasePath(AppDatabase.NAME) ?: return
             if (!src.exists() || src.length() == 0L) return
             val dir = File(getExternalFilesDir(null), "db_backups").apply { mkdirs() }
-            val backups = dir.listFiles { f -> f.name.startsWith("obd2_monitor_") && f.name.endsWith(".db") }
+            val backups = dir.listFiles { f ->
+                f.name.startsWith("obd2_monitor_") && (f.name.endsWith(".db") || f.name.endsWith(".db.gz"))
+            }
                 ?.sortedByDescending { it.lastModified() }
                 .orEmpty()
             val today = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
@@ -69,14 +74,17 @@ class OBDApplication : Application() {
                 db.openHelper.writableDatabase.query("PRAGMA wal_checkpoint(FULL)").use { it.moveToFirst() }
             }
             val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-            src.copyTo(File(dir, "obd2_monitor_$stamp.db"), overwrite = true)
-            (listOf(File(dir, "obd2_monitor_$stamp.db")) + backups)
+            val out = File(dir, "obd2_monitor_$stamp.db.gz")
+            val tmp = File(dir, "${out.name}.tmp")
+            src.inputStream().use { ins -> GZIPOutputStream(tmp.outputStream().buffered()).use { ins.copyTo(it) } }
+            if (!tmp.renameTo(out)) return
+            (listOf(out) + backups)
                 .drop(MAX_BACKUPS)
                 .forEach { runCatching { it.delete() } }
         }
     }
 
     private companion object {
-        const val MAX_BACKUPS = 10
+        const val MAX_BACKUPS = 3
     }
 }

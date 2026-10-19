@@ -2,12 +2,13 @@ package com.obd2monitor.data.database
 
 import androidx.room.ColumnInfo
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 import kotlinx.serialization.Serializable
 import java.util.UUID
 
 @Serializable
-@Entity(tableName = "trips")
+@Entity(tableName = "trips", indices = [Index(value = ["no"], unique = true)])
 data class TripEntity(
     @PrimaryKey val id: String = UUID.randomUUID().toString(),
     val vehicleProfileId: String,
@@ -24,34 +25,45 @@ data class TripEntity(
     /** Накопленное время на паузе, мс. Источник истины — TripController флашит сюда
      *  раз в ~5 с пока paused == true. Реальное «в пути» = (endTime ?: now) - startTime - pausedMs. */
     val pausedMs: Long = 0L,
+    /** Короткий номер поездки: по нему на неё ссылаются замеры (OBDReadingEntity.tripNo). */
+    val no: Long = 0L,
 )
 
-@Serializable
+/**
+ * Замер поездки. Поездка указана номером trips.no, а не её UUID: 36 символов в
+ * каждой из сотен тысяч строк и ещё раз в индексе занимали почти половину базы.
+ * Показания хранятся целыми числами в сотых долях (×[SCALE]): так строка намного
+ * короче, а погрешность в 0,005 нигде не видна. Перевод — в Mappers.
+ */
 @Entity(tableName = "obd_readings")
 data class OBDReadingEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    @ColumnInfo(index = true) val tripId: String,
+    @ColumnInfo(index = true) val tripNo: Long,
     val timestamp: Long,
-    val speedKmh: Float = 0f,
-    val rpm: Float = 0f,
-    val coolantTempC: Float = 0f,
-    val throttlePercent: Float = 0f,
-    val fuelLevelPercent: Float = 0f,
-    val mafGs: Float = 0f,
-    val instantFuelLPer100: Float = 0f,
-    val batteryVoltage: Float = 0f,
-    val engineLoadPercent: Float = 0f,
-    val intakeTempC: Float = 0f,
-    val mapKpa: Float = 0f,
-    val ignitionTimingDeg: Float = 0f,
-    val oilTempC: Float = 0f,
-    val shortFuelTrim1Pct: Float = 0f,
-    val longFuelTrim1Pct: Float = 0f,
-    val distanceMilKm: Float = 0f,
-    val distanceSinceClearKm: Float = 0f,
+    val speedKmh: Int = 0,
+    val rpm: Int = 0,
+    val coolantTempC: Int = 0,
+    val throttlePercent: Int = 0,
+    val fuelLevelPercent: Int = 0,
+    val mafGs: Int = 0,
+    val instantFuelLPer100: Int = 0,
+    val batteryVoltage: Int = 0,
+    val engineLoadPercent: Int = 0,
+    val intakeTempC: Int = 0,
+    val mapKpa: Int = 0,
+    val ignitionTimingDeg: Int = 0,
+    val oilTempC: Int = 0,
+    val shortFuelTrim1Pct: Int = 0,
+    val longFuelTrim1Pct: Int = 0,
+    val distanceMilKm: Int = 0,
+    val distanceSinceClearKm: Int = 0,
     val latitude: Double? = null,
     val longitude: Double? = null,
-)
+) {
+    companion object {
+        const val SCALE = 100f
+    }
+}
 
 @Entity(tableName = "vehicle_profiles")
 data class VehicleProfileEntity(

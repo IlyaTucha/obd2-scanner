@@ -15,6 +15,7 @@ import com.obd2monitor.domain.repository.TripRepository
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.max
@@ -24,6 +25,10 @@ class TripRepositoryImpl @Inject constructor(
     private val dao: TripDao,
     private val vehicleDao: VehicleProfileDao,
 ) : TripRepository {
+
+    /** Номера поездок (TripEntity.no) для записи замеров: сервис пишет их по паре в
+     *  секунду, искать номер в БД на каждый замер незачем. */
+    private val tripNos = ConcurrentHashMap<String, Long>()
 
     override fun observeTrips(): Flow<List<Trip>> = dao.observeAll().map { it.map { e -> e.toDomain() } }
 
@@ -36,6 +41,30 @@ class TripRepositoryImpl @Inject constructor(
     override suspend fun addPausedMs(tripId: String, deltaMs: Long) {
         if (deltaMs <= 0L) return
         dao.addPausedMs(tripId, deltaMs)
+    }
+
+    /**
+     * Простой нельзя просто прибавить к pausedMs: до гибели процесса TripController
+     * уже успел записать в БД часть этой же паузы (сессия встала на паузу без данных,
+     * потом телефон перезагрузился). Двойной учёт съедал время «в пути», и таймер
+     * после перезапуска показывал меньше, чем было. Поэтому пауза зажимается между
+     * разрывами, видными по замерам (вместе с хвостом до [now]), и всем временем без
+     * записи — как и при завершении (см. endAndPause).
+     */
+    override suspend fun pausedMsOnAdopt(tripId: String, now: Long): Long {
+        val trip = dao.getById(tripId) ?: return 0L
+        val readings = dao.readingsFor(tripId).map { it.toDomain(tripId) }
+        val paused = if (readings.isEmpty()) {
+            (now - trip.startTime).coerceAtLeast(0L)
+        } else {
+            val tailMs = (now - readings.last().timestamp).coerceAtLeast(0L)
+            val minPause = TripMath.recordedGapsMs(readings, trip.startTime) +
+                (if (tailMs > TripMath.MAX_GAP_MS) tailMs else 0L)
+            val maxPause = (now - trip.startTime - TripMath.recordedSpanMs(readings)).coerceAtLeast(minPause)
+            (trip.pausedMs + tailMs).coerceIn(minPause, maxPause)
+        }
+        dao.update(trip.copy(pausedMs = paused))
+        return paused
     }
 
     override suspend fun startTrip(vehicleProfileId: String): String {
@@ -54,17 +83,19 @@ class TripRepositoryImpl @Inject constructor(
             maxRpm = 0,
             routePoints = emptyList(),
         )
-        dao.insert(trip.toEntity())
+        tripNos[id] = dao.insertNumbered(trip.toEntity()).no
         return id
     }
 
     override suspend fun appendReading(reading: OBDReading) {
-        dao.insertReading(reading.toEntity())
+        // Поездку уже удалили — замер некуда привязать.
+        val no = tripNos[reading.tripId] ?: dao.noOf(reading.tripId)?.also { tripNos[reading.tripId] = it } ?: return
+        dao.insertReading(reading.toEntity(no))
     }
 
     override suspend fun finishTrip(tripId: String) {
         val current = dao.getById(tripId) ?: return
-        val readings = dao.readingsFor(tripId).map { it.toDomain() }
+        val readings = dao.readingsFor(tripId).map { it.toDomain(tripId) }
         val profile = vehicleDao.getById(current.vehicleProfileId)?.toDomain()
         val now = System.currentTimeMillis()
         if (readings.isEmpty()) {
@@ -112,7 +143,7 @@ class TripRepositoryImpl @Inject constructor(
     override suspend fun trimTrailingPauses() {
         dao.finishedWithTrailingGap(TripMath.MAX_GAP_MS).forEach { trip ->
             val finishedAt = trip.endTime ?: return@forEach
-            val readings = dao.readingsFor(trip.id).map { it.toDomain() }
+            val readings = dao.readingsFor(trip.id).map { it.toDomain(trip.id) }
             if (readings.isEmpty()) return@forEach
             val (endTime, pausedMs) = endAndPause(trip, readings, finishedAt)
             val activeH = ((endTime - trip.startTime - pausedMs).coerceAtLeast(0L)) / 3_600_000f
@@ -151,8 +182,9 @@ class TripRepositoryImpl @Inject constructor(
     override suspend fun deleteTrip(tripId: String) {
         dao.deleteReadings(tripId)
         dao.delete(tripId)
+        tripNos.remove(tripId)
     }
 
     override suspend fun readingsFor(tripId: String): List<OBDReading> =
-        dao.readingsFor(tripId).map { it.toDomain() }
+        dao.readingsFor(tripId).map { it.toDomain(tripId) }
 }

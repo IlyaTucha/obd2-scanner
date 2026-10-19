@@ -12,10 +12,12 @@ interface TripRepository {
     fun observeFuelTotals(profileId: String): Flow<List<TripFuelRow>>
     /** Снимок активной поездки на момент вызова (без подписки). */
     suspend fun getActiveTripOnce(): Trip?
-    /** Timestamp последней записанной точки данных по поездке. Используется при
-     *  усыновлении осиротевшей сессии — простой между last reading и now засчитывается
-     *  в pausedMs. */
+    /** Timestamp последней записанной точки данных по поездке. */
     suspend fun lastReadingTimestamp(tripId: String): Long?
+    /** Пауза активной поездки на момент [now] при её усыновлении после перезапуска
+     *  приложения: простой с последнего замера засчитывается в паузу. Записывает
+     *  результат в БД и возвращает его. */
+    suspend fun pausedMsOnAdopt(tripId: String, now: Long): Long
     suspend fun getTrip(id: String): Trip?
     suspend fun startTrip(vehicleProfileId: String): String
     suspend fun appendReading(reading: OBDReading)

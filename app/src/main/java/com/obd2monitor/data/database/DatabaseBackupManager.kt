@@ -3,6 +3,7 @@ package com.obd2monitor.data.database
 import android.content.Context
 import android.net.Uri
 import androidx.room.withTransaction
+import com.obd2monitor.domain.model.OBDReading
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -15,14 +16,92 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /** Контейнер JSON-бэкапа только поездок: trips + obd_readings. Версия для миграций
- *  формата на будущее (например, если поменяется набор полей в OBDReadingEntity). */
+ *  формата на будущее (например, если поменяется набор полей замера). */
 @Serializable
 data class TripBackupPayload(
     val version: Int = 1,
     val exportedAt: Long = 0L,
     val trips: List<TripEntity> = emptyList(),
-    val readings: List<OBDReadingEntity> = emptyList(),
+    val readings: List<ReadingJson> = emptyList(),
 )
+
+/** Замер в JSON-бэкапе: поездка по UUID, показания дробные — как в файлах, выгруженных
+ *  до перехода БД на номера поездок и целые сотые (схема v7), чтобы старые файлы
+ *  импортировались, а новые открывались старыми версиями. */
+@Serializable
+data class ReadingJson(
+    val tripId: String,
+    val timestamp: Long,
+    val speedKmh: Float = 0f,
+    val rpm: Float = 0f,
+    val coolantTempC: Float = 0f,
+    val throttlePercent: Float = 0f,
+    val fuelLevelPercent: Float = 0f,
+    val mafGs: Float = 0f,
+    val instantFuelLPer100: Float = 0f,
+    val batteryVoltage: Float = 0f,
+    val engineLoadPercent: Float = 0f,
+    val intakeTempC: Float = 0f,
+    val mapKpa: Float = 0f,
+    val ignitionTimingDeg: Float = 0f,
+    val oilTempC: Float = 0f,
+    val shortFuelTrim1Pct: Float = 0f,
+    val longFuelTrim1Pct: Float = 0f,
+    val distanceMilKm: Float = 0f,
+    val distanceSinceClearKm: Float = 0f,
+    val latitude: Double? = null,
+    val longitude: Double? = null,
+) {
+    fun toDomain(): OBDReading = OBDReading(
+        tripId = tripId,
+        timestamp = timestamp,
+        speedKmh = speedKmh,
+        rpm = rpm,
+        coolantTempC = coolantTempC,
+        throttlePercent = throttlePercent,
+        fuelLevelPercent = fuelLevelPercent,
+        mafGs = mafGs,
+        instantFuelLPer100 = instantFuelLPer100,
+        batteryVoltage = batteryVoltage,
+        engineLoadPercent = engineLoadPercent,
+        intakeTempC = intakeTempC,
+        mapKpa = mapKpa,
+        ignitionTimingDeg = ignitionTimingDeg,
+        oilTempC = oilTempC,
+        shortFuelTrim1Pct = shortFuelTrim1Pct,
+        longFuelTrim1Pct = longFuelTrim1Pct,
+        distanceMilKm = distanceMilKm,
+        distanceSinceClearKm = distanceSinceClearKm,
+        latitude = latitude,
+        longitude = longitude,
+    )
+
+    companion object {
+        fun from(r: OBDReading) = ReadingJson(
+            tripId = r.tripId,
+            timestamp = r.timestamp,
+            speedKmh = r.speedKmh,
+            rpm = r.rpm,
+            coolantTempC = r.coolantTempC,
+            throttlePercent = r.throttlePercent,
+            fuelLevelPercent = r.fuelLevelPercent,
+            mafGs = r.mafGs,
+            instantFuelLPer100 = r.instantFuelLPer100,
+            batteryVoltage = r.batteryVoltage,
+            engineLoadPercent = r.engineLoadPercent,
+            intakeTempC = r.intakeTempC,
+            mapKpa = r.mapKpa,
+            ignitionTimingDeg = r.ignitionTimingDeg,
+            oilTempC = r.oilTempC,
+            shortFuelTrim1Pct = r.shortFuelTrim1Pct,
+            longFuelTrim1Pct = r.longFuelTrim1Pct,
+            distanceMilKm = r.distanceMilKm,
+            distanceSinceClearKm = r.distanceSinceClearKm,
+            latitude = r.latitude,
+            longitude = r.longitude,
+        )
+    }
+}
 
 /**
  * Экспорт и импорт основной БД приложения. Формат — сырой SQLite-файл (.db).
@@ -76,7 +155,7 @@ class DatabaseBackupManager @Inject constructor(
                 out.newLine()
                 trips.forEach { trip ->
                     tripDao.readingsFor(trip.id).forEach { r ->
-                        out.write(json.encodeToString(r))
+                        out.write(json.encodeToString(ReadingJson.from(r.toDomain(trip.id))))
                         out.newLine()
                     }
                 }
@@ -88,8 +167,9 @@ class DatabaseBackupManager @Inject constructor(
     /**
      * Импорт поездок. Поездка с тем же id заменяется целиком: её старые показания
      * удаляются перед записью новых (связи между таблицами нет, и без этого
-     * повторный импорт задваивал бы показания). Понимает v1 (всё одной строкой)
-     * и v2 (построчно). Возвращает количество импортированных поездок.
+     * повторный импорт задваивал бы показания) и сохраняет свой номер, новая
+     * получает следующий. Понимает v1 (всё одной строкой) и v2 (построчно).
+     * Возвращает количество импортированных поездок.
      */
     suspend fun importTripsFrom(uri: Uri): Result<Int> = withContext(Dispatchers.IO) {
         runCatching {
@@ -100,20 +180,28 @@ class DatabaseBackupManager @Inject constructor(
                     .getOrElse { error("Файл не похож на бэкап сессий") }
                 check(payload.version in 1..2) { "Неподдерживаемая версия бэкапа: ${payload.version}" }
 
+                val nos = HashMap<String, Long>()
                 db.withTransaction {
                     payload.trips.forEach { trip ->
-                        tripDao.deleteReadings(trip.id)
-                        tripDao.insert(trip)
+                        val no = tripDao.noOf(trip.id)
+                        if (no != null) {
+                            tripDao.deleteReadings(trip.id)
+                            tripDao.insert(trip.copy(no = no))
+                            nos[trip.id] = no
+                        } else {
+                            nos[trip.id] = tripDao.insertNumbered(trip).no
+                        }
                     }
                 }
-                // Для readings обнуляем autogen-id: Room назначит новые без конфликтов.
+                // id замеров не переносим: Room назначит новые без конфликтов.
                 val readings = if (payload.version == 1) {
                     payload.readings.asSequence()
                 } else {
                     reader.lineSequence().filter { it.isNotBlank() }
-                        .map { json.decodeFromString<OBDReadingEntity>(it) }
+                        .map { json.decodeFromString<ReadingJson>(it) }
                 }
-                readings.map { it.copy(id = 0L) }.chunked(IMPORT_BATCH).forEach { batch ->
+                readings.mapNotNull { r -> nos[r.tripId]?.let { r.toDomain().toEntity(it) } }
+                    .chunked(IMPORT_BATCH).forEach { batch ->
                     db.withTransaction { tripDao.insertReadings(batch) }
                 }
                 payload.trips.size

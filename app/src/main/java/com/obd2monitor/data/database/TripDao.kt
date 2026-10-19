@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import com.obd2monitor.domain.model.TripFuelRow
 import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
@@ -43,6 +44,20 @@ interface TripDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(trip: TripEntity)
 
+    @Query("SELECT no FROM trips WHERE id = :id")
+    suspend fun noOf(id: String): Long?
+
+    @Query("SELECT COALESCE(MAX(no), 0) FROM trips")
+    suspend fun maxNo(): Long
+
+    /** Новая поездка со следующим свободным номером. */
+    @Transaction
+    suspend fun insertNumbered(trip: TripEntity): TripEntity {
+        val numbered = trip.copy(no = maxNo() + 1)
+        insert(numbered)
+        return numbered
+    }
+
     @Update
     suspend fun update(trip: TripEntity)
 
@@ -56,17 +71,20 @@ interface TripDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertReadings(readings: List<OBDReadingEntity>)
 
-    @Query("SELECT * FROM obd_readings WHERE tripId = :tripId ORDER BY timestamp ASC")
+    @Query(
+        "SELECT * FROM obd_readings WHERE tripNo = (SELECT no FROM trips WHERE id = :tripId) " +
+            "ORDER BY timestamp ASC"
+    )
     suspend fun readingsFor(tripId: String): List<OBDReadingEntity>
 
-    @Query("SELECT MAX(timestamp) FROM obd_readings WHERE tripId = :tripId")
+    @Query("SELECT MAX(timestamp) FROM obd_readings WHERE tripNo = (SELECT no FROM trips WHERE id = :tripId)")
     suspend fun lastReadingTimestamp(tripId: String): Long?
 
     /** Завершённые поездки, у которых конец позже последнего замера больше чем на
      *  [gapMs]: время окончания включает хвост паузы. */
     @Query(
         "SELECT * FROM trips t WHERE t.endTime IS NOT NULL AND " +
-            "t.endTime - (SELECT MAX(r.timestamp) FROM obd_readings r WHERE r.tripId = t.id) > :gapMs"
+            "t.endTime - (SELECT MAX(r.timestamp) FROM obd_readings r WHERE r.tripNo = t.no) > :gapMs"
     )
     suspend fun finishedWithTrailingGap(gapMs: Long): List<TripEntity>
 
@@ -74,9 +92,9 @@ interface TripDao {
      * Показания без сессии (сессия удалена раньше, чем сервис дописал последние
      * точки, — бывало в старых версиях). Нигде не видны и не экспортируются.
      */
-    @Query("DELETE FROM obd_readings WHERE tripId NOT IN (SELECT id FROM trips)")
+    @Query("DELETE FROM obd_readings WHERE tripNo NOT IN (SELECT no FROM trips)")
     suspend fun deleteOrphanReadings(): Int
 
-    @Query("DELETE FROM obd_readings WHERE tripId = :tripId")
+    @Query("DELETE FROM obd_readings WHERE tripNo = (SELECT no FROM trips WHERE id = :tripId)")
     suspend fun deleteReadings(tripId: String)
 }

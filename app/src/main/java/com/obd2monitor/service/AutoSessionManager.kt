@@ -239,7 +239,6 @@ class AutoSessionManager @Inject constructor(
         val gpsTripId = prefs.gpsTripId.first()
         val manual = prefs.manualPauseTripId.first() == orphan.id
         val now = System.currentTimeMillis()
-        val ageMs = now - orphan.startTime
         val lastReadingTs = tripRepo.lastReadingTimestamp(orphan.id)
         if (!manual && now - (lastReadingTs ?: orphan.startTime) > ORPHAN_MAX_AGE_MS) {
             finishTrip(orphan.id)
@@ -250,14 +249,12 @@ class AutoSessionManager @Inject constructor(
         // Простой между последней записью и текущим моментом — это время, когда
         // приложение было убито. Записей не было — засчитываем как паузу, иначе UI
         // покажет «активный» интервал, в котором на самом деле записано 0 точек.
-        val downtimeMs = lastReadingTs?.let { (now - it).coerceAtLeast(0L) } ?: ageMs
-        if (downtimeMs > 1_000L) tripRepo.addPausedMs(orphan.id, downtimeMs)
-        val adopted = tripRepo.getActiveTripOnce()
+        val pausedMs = tripRepo.pausedMsOnAdopt(orphan.id, now)
         currentTripId = orphan.id
         controller.onTripAdopted(
             tripId = orphan.id,
             startTime = orphan.startTime,
-            pausedMsSoFar = adopted?.pausedMs ?: orphan.pausedMs,
+            pausedMsSoFar = pausedMs,
             gpsMode = orphan.id == gpsTripId,
             manualPause = manual,
         )
