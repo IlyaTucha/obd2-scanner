@@ -17,6 +17,7 @@ import com.obd2monitor.domain.model.OBDProtocol
 import com.obd2monitor.domain.repository.DTCRepository
 import com.obd2monitor.domain.repository.OBDRepository
 import com.obd2monitor.domain.repository.VehicleProfileRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -54,6 +55,7 @@ class OBDRepositoryImpl @Inject constructor(
     private val _liveData = MutableSharedFlow<OBDData>(replay = 1, extraBufferCapacity = 16)
     private var pollJob: Job? = null
     private var recoveryJob: Job? = null
+    private var connectJob: Job? = null
 
     // Антиспайк скорости (см. sanitizeSpeed). Поля защищены ioMutex —
     // readSnapshot/startPolling всегда работают под ним или последовательно.
@@ -151,7 +153,9 @@ class OBDRepositoryImpl @Inject constructor(
      *  настроек зовут connect() из lifecycleScope/viewModelScope, и закрытие экрана
      *  посреди handshake отменяло бы подключение. */
     override suspend fun connect(deviceAddress: String) {
-        scope.launch { connectInternal(deviceAddress) }.join()
+        val job = scope.launch { connectInternal(deviceAddress) }
+        connectJob = job
+        job.join()
     }
 
     private suspend fun connectInternal(deviceAddress: String) {
@@ -189,6 +193,8 @@ class OBDRepositoryImpl @Inject constructor(
             )
             startPolling()
         } catch (t: Throwable) {
+            // Отмена (disconnect) — не сбой: без ERROR и без повторов.
+            if (t is CancellationException) throw t
             // Сохраняем deviceAddress — чтобы кнопка «Переподключить» в UI осталась
             // активной даже при провале handshake. CONNECTED при пустой маске не
             // объявляем (иначе откроется trip, встанет на «Паузу», карта пишется пустой).
@@ -204,6 +210,8 @@ class OBDRepositoryImpl @Inject constructor(
     }
 
     override suspend fun disconnect() {
+        // Крестик в настройках во время подключения — отмена идущей попытки.
+        connectJob?.cancel(); connectJob = null
         recoveryJob?.cancel(); recoveryJob = null
         pollJob?.cancel(); pollJob = null
         bt.close()
@@ -276,6 +284,8 @@ class OBDRepositoryImpl @Inject constructor(
             )
             startPolling()
         } catch (t: Throwable) {
+            // Отмена (disconnect) — не сбой: без ERROR и без повторов.
+            if (t is CancellationException) throw t
             _status.value = _status.value.copy(state = ConnectionState.ERROR, errorMessage = t.message)
             try { bt.close() } catch (_: Throwable) {}
             scheduleRecovery()
@@ -316,6 +326,7 @@ class OBDRepositoryImpl @Inject constructor(
                 bt.connect(addr)
                 return handshakeOrThrow(preferred)
             } catch (t: Throwable) {
+                if (t is CancellationException) throw t
                 last = t
             }
         }

@@ -19,6 +19,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.AlertDialog
@@ -29,6 +30,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -101,19 +103,10 @@ fun SettingsScreen(
             expanded = connectionExpanded,
             onToggle = { connectionExpanded = !connectionExpanded },
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 8.dp)) {
-                Column(Modifier.weight(1f)) {
-                    Text("Подключаться автоматически", style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        "При запуске приложения — к последнему адаптеру",
-                        color = ColorTextSecondary,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                Switch(checked = state.autoConnect, onCheckedChange = viewModel::setAutoConnect)
-            }
             ConnectionBody(
                 isConnected = isConnected,
+                autoConnect = state.autoConnect,
+                onAutoConnectChange = viewModel::setAutoConnect,
                 connectingAddress = conn.deviceAddress?.takeIf {
                     conn.state == ConnectionState.CONNECTING ||
                         conn.state == ConnectionState.INITIALIZING
@@ -321,6 +314,8 @@ private fun CollapsibleCard(
 @Composable
 private fun ConnectionBody(
     isConnected: Boolean,
+    autoConnect: Boolean,
+    onAutoConnectChange: (Boolean) -> Unit,
     connectingAddress: String?,
     connectingStage: String?,
     currentAddress: String?,
@@ -330,19 +325,28 @@ private fun ConnectionBody(
     onDisconnect: () -> Unit,
 ) {
     Column {
-        Row {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 if (isConnected) "Подключено: $currentAddress" else "Не подключено",
                 modifier = Modifier.weight(1f),
                 style = MaterialTheme.typography.bodyMedium,
             )
-            if (isConnected) {
-                OutlinedButton(onClick = onDisconnect) { Text("Отключить") }
-            } else {
-                OutlinedButton(onClick = onRefresh) { Text("Обновить") }
-            }
+            // Отключение — крестиком в строке адаптера, здесь только обновление списка.
+            OutlinedButton(onClick = onRefresh) { Text("Обновить") }
         }
         Spacer(Modifier.height(8.dp))
+        HorizontalDivider(color = ColorTextSecondary.copy(alpha = 0.2f))
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 8.dp)) {
+            Column(Modifier.weight(1f)) {
+                Text("Подключаться автоматически", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    "При запуске приложения — к последнему адаптеру",
+                    color = ColorTextSecondary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Switch(checked = autoConnect, onCheckedChange = onAutoConnectChange)
+        }
         HorizontalDivider(color = ColorTextSecondary.copy(alpha = 0.2f))
         if (devices.isEmpty()) {
             Spacer(Modifier.height(8.dp))
@@ -387,12 +391,16 @@ private fun ConnectionBody(
                                 color = ColorPrimary,
                                 style = MaterialTheme.typography.labelMedium,
                             )
+                            DisconnectButton(contentDescription = "Отменить подключение", onClick = onDisconnect)
                         }
-                        isThisActive -> Text(
-                            "Подключено",
-                            color = com.obd2monitor.ui.theme.ColorSuccess,
-                            style = MaterialTheme.typography.labelMedium,
-                        )
+                        isThisActive -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "Подключено",
+                                color = com.obd2monitor.ui.theme.ColorSuccess,
+                                style = MaterialTheme.typography.labelMedium,
+                            )
+                            DisconnectButton(contentDescription = "Отключить", onClick = onDisconnect)
+                        }
                         else -> Text(
                             "Подключить",
                             color = ColorNeutral,
@@ -402,6 +410,19 @@ private fun ConnectionBody(
                 }
             }
         }
+    }
+}
+
+/** Крестик справа в строке адаптера: отключиться или отменить идущее подключение. */
+@Composable
+private fun DisconnectButton(contentDescription: String, onClick: () -> Unit) {
+    IconButton(onClick = onClick, modifier = Modifier.size(36.dp)) {
+        Icon(
+            Icons.Filled.Close,
+            contentDescription = contentDescription,
+            tint = ColorTextSecondary,
+            modifier = Modifier.size(20.dp),
+        )
     }
 }
 
