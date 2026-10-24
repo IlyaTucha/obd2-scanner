@@ -64,6 +64,12 @@ class TripController @Inject constructor(
      *  ставит запись на паузу — маршрут, скорость и пробег пишутся по спутникам. */
     val gpsMode: StateFlow<Boolean> = _gpsMode.asStateFlow()
 
+    private val _gpsFallback = MutableStateFlow(false)
+    /** OBD-сессия, у которой пропала связь с адаптером, а машина едет: маршрут и скорость
+     *  временно пишутся по GPS (ставит и снимает сервис). Пока флаг поднят, watchdog'и
+     *  AutoSessionManager не ставят паузу по отсутствию данных OBD. */
+    val gpsFallback: StateFlow<Boolean> = _gpsFallback.asStateFlow()
+
     private val _lastGpsFixAt = MutableStateFlow<Long?>(null)
     /** Время последнего принятого GPS-фикса — UI показывает «ожидание сигнала GPS». */
     val lastGpsFixAt: StateFlow<Long?> = _lastGpsFixAt.asStateFlow()
@@ -149,12 +155,15 @@ class TripController @Inject constructor(
         if (value) setPaused(true)
     }
 
+    fun setGpsFallback(value: Boolean) { _gpsFallback.value = value }
+
     fun onGpsFix(at: Long) { _lastGpsFixAt.value = at }
 
     /** Вызывать при старте новой сессии. Сбрасывает счётчик. */
     fun onTripStarted(tripId: String, gpsMode: Boolean = false) {
         currentTripId = tripId
         _gpsMode.value = gpsMode
+        _gpsFallback.value = false
         _lastGpsFixAt.value = null
         _durationMs.value = 0L
         _pausedMs.value = 0L
@@ -172,6 +181,7 @@ class TripController @Inject constructor(
     fun onTripAdopted(tripId: String, startTime: Long, pausedMsSoFar: Long, gpsMode: Boolean, manualPause: Boolean) {
         currentTripId = tripId
         _gpsMode.value = gpsMode
+        _gpsFallback.value = false
         _lastGpsFixAt.value = null
         val now = System.currentTimeMillis()
         val elapsed = (now - startTime).coerceAtLeast(0L)
@@ -197,6 +207,7 @@ class TripController @Inject constructor(
         currentTripId = null
         unflushedPauseMs = 0L
         _gpsMode.value = false
+        _gpsFallback.value = false
         _lastGpsFixAt.value = null
         _paused.value = false
         _manualPause.value = false
@@ -210,5 +221,6 @@ class TripController @Inject constructor(
 
     fun reset() {
         _paused.value = false
+        _gpsFallback.value = false
     }
 }

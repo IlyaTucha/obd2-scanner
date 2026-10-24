@@ -82,6 +82,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.obd2monitor.domain.model.MetricNames
 import com.obd2monitor.domain.model.ConnectionState
+import com.obd2monitor.domain.model.ConnectionStatus
 import com.obd2monitor.domain.model.Trip
 import com.obd2monitor.service.TripController
 import com.obd2monitor.ui.components.AdaptiveGrid
@@ -131,7 +132,7 @@ fun TripActiveScreen(
 
         if (activeTrip == null) {
             IdleCard(
-                isConnected = state.connection.state == ConnectionState.CONNECTED,
+                connection = state.connection,
                 onStartGps = startGps,
                 onOpenSettings = onOpenSettings,
             )
@@ -223,7 +224,13 @@ private fun rememberGpsStarter(onStart: () -> Unit): () -> Unit {
 }
 
 @Composable
-private fun IdleCard(isConnected: Boolean, onStartGps: () -> Unit, onOpenSettings: () -> Unit) {
+private fun IdleCard(connection: ConnectionStatus, onStartGps: () -> Unit, onOpenSettings: () -> Unit) {
+    val isConnected = connection.state == ConnectionState.CONNECTED
+    // Идёт подключение (или авто-повторы после неудачной попытки): сервис записи уже
+    // поднят и ждёт адаптер — показываем подготовку, а не «Сессия не идёт».
+    val preparing = connection.state == ConnectionState.CONNECTING ||
+        connection.state == ConnectionState.INITIALIZING ||
+        (connection.state == ConnectionState.ERROR && connection.deviceAddress != null)
     Column(
         Modifier
             .fillMaxWidth()
@@ -241,13 +248,28 @@ private fun IdleCard(isConnected: Boolean, onStartGps: () -> Unit, onOpenSetting
             )
             return@Column
         }
-        Text("Сессия не идёт", style = MaterialTheme.typography.titleMedium)
-        Text(
-            "Запись начинается автоматически при подключении OBD-адаптера. " +
-                "Без адаптера можно записать маршрут по GPS — пробег, скорость и время в пути.",
-            color = ColorTextSecondary,
-            style = MaterialTheme.typography.bodyMedium,
-        )
+        if (preparing) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(10.dp).clip(CircleShape).background(ColorWarning))
+                Spacer(Modifier.width(8.dp))
+                Text("Подготовка к записи", color = ColorWarning, style = MaterialTheme.typography.titleMedium)
+            }
+            Text(
+                if (connection.state == ConnectionState.ERROR)
+                    "Адаптер пока не отвечает, повторяем попытки. Сессия начнётся сама, как только он подключится — приложение можно свернуть."
+                else "Подключаемся к адаптеру. Сессия начнётся сама — приложение можно свернуть.",
+                color = ColorTextSecondary,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        } else {
+            Text("Сессия не идёт", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Запись начинается автоматически при подключении OBD-адаптера. " +
+                    "Без адаптера можно записать маршрут по GPS — пробег, скорость и время в пути.",
+                color = ColorTextSecondary,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
             Button(
                 onClick = onStartGps,
@@ -273,7 +295,9 @@ private fun StatusCard(state: TripUiState, onFinish: () -> Unit, onPause: () -> 
     @Suppress("UNUSED_EXPRESSION") state.durationMs // тик раз в 500 мс — пересчёт «ожидания GPS»
     val waitingGps = state.gpsMode && !obdFlowing &&
         (state.lastGpsFixAt == null || now - state.lastGpsFixAt > GPS_WAIT_HINT_MS)
-    val paused = if (state.gpsMode) state.paused else state.paused || !obdFlowing
+    // OBD-сессия без адаптера, которая пишется по GPS, на паузе только по факту паузы.
+    val gpsFallback = state.gpsFallback && !obdFlowing
+    val paused = if (state.gpsMode || gpsFallback) state.paused else state.paused || !obdFlowing
 
     val (color, title, hint) = when {
         state.manualPause -> Triple(ColorWarning, "Пауза",
@@ -285,8 +309,10 @@ private fun StatusCard(state: TripUiState, onFinish: () -> Unit, onPause: () -> 
             "Под открытым небом сигнал обычно появляется в течение минуты.")
         state.gpsMode -> Triple(ColorSuccess, "Идёт запись",
             if (obdFlowing) "Источники: GPS и OBD-адаптер." else "Источник: GPS. Данные двигателя появятся при подключении адаптера.")
+        gpsFallback && !paused -> Triple(ColorSuccess, "Идёт запись по GPS",
+            "Связь с адаптером потеряна — маршрут и скорость пишутся по GPS. Данные двигателя вернутся после переподключения.")
         !connected -> Triple(ColorWarning, "Ожидание адаптера",
-            "Связь с адаптером потеряна. Запись продолжится в эту же сессию после переподключения.")
+            "Связь с адаптером потеряна. Запись продолжится в эту же сессию после переподключения, а если поехать без адаптера — маршрут запишется по GPS.")
         paused -> Triple(ColorWarning, "Пауза: нет данных",
             "Адаптер подключён, но блок управления не передаёт данные. Запись продолжится автоматически.")
         else -> Triple(ColorSuccess, "Идёт запись",

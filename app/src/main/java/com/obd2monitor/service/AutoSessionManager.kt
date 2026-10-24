@@ -59,8 +59,16 @@ class AutoSessionManager @Inject constructor(
      *  подключение — это новый запуск, и ручная пауза снимается. Без этого флага её
      *  снимал бы и лёгкий реконнект при работающем двигателе (CONNECTED → … → CONNECTED). */
     private var manualPauseSawDisconnect = false
+    /** С какого момента сервис запущен «впрок» на время подключения, когда сессии ещё нет.
+     *  Запускаем его на нажатии «Подключить» / автоподключении, пока приложение на экране:
+     *  из фона Android 12+ не даёт стартовать foreground-сервис, и раньше сессия,
+     *  открытая после того как пользователь свернул приложение, оставалась без записи
+     *  (а сам процесс без сервиса система замораживала, и подключение не доходило до конца). */
+    private var standbySince: Long? = null
 
     companion object {
+        /** Сколько держим сервис в ожидании адаптера, если подключиться так и не удалось. */
+        private const val CONNECT_STANDBY_MAX_MS = 10 * 60_000L
         /** Если за этот интервал не пришёл ни один валидный snapshot — считаем разрыв и ставим паузу. */
         private const val STALE_DATA_THRESHOLD_MS = 10_000L
         /** Брошенная сессия старше этого — закрывается автоматически на старте app,
@@ -99,10 +107,11 @@ class AutoSessionManager @Inject constructor(
 
         // Watchdog «частичного разрыва»: CONNECTED, но данные не идут >10 c — пауза.
         // GPS-сессию не трогаем: она пишется и без ЭБУ (паузу ей ставит сервис на стоянке).
+        // Так же и OBD-сессию, которая сейчас пишется по GPS (адаптер отвалился на ходу).
         scope.launch {
             while (isActive) {
                 delay(2000)
-                if (currentTripId == null || controller.gpsMode.value) continue
+                if (currentTripId == null || controller.gpsMode.value || controller.gpsFallback.value) continue
                 val s = obdRepo.connectionStatus.value
                 if (s.state != ConnectionState.CONNECTED) continue
                 val now = System.currentTimeMillis()
@@ -126,6 +135,22 @@ class AutoSessionManager @Inject constructor(
                 val pauseStart = controller.pauseSinceMs.value ?: continue
                 if (System.currentTimeMillis() - pauseStart >= ORPHAN_MAX_AGE_MS) {
                     runCatching { tripMutex.withLock { closeTripLocked() } }
+                }
+            }
+        }
+
+        // Watchdog ожидания адаптера: адаптер так и не подключился — снимаем сервис,
+        // чтобы уведомление и GPS не висели без сессии.
+        scope.launch {
+            while (isActive) {
+                delay(30_000)
+                runCatching {
+                    tripMutex.withLock {
+                        val since = standbySince ?: return@withLock
+                        if (currentTripId == null &&
+                            System.currentTimeMillis() - since >= CONNECT_STANDBY_MAX_MS
+                        ) stopStandbyLocked()
+                    }
                 }
             }
         }
@@ -187,8 +212,22 @@ class AutoSessionManager @Inject constructor(
                 val tripId = startTrip(profile.id)
                 currentTripId = tripId
                 controller.onTripStarted(tripId)
-                startService()
+                // Сервис обычно уже работает с момента подключения и сам подхватит
+                // сессию. Повторный старт из фона Android может запретить — не страшно.
+                val wasStandby = standbySince != null
+                standbySince = null
+                if (wasStandby) runCatching { startService() } else startService()
             }
+            // Начало подключения без открытой сессии: поднимаем сервис заранее, пока
+            // приложение на экране (см. standbySince). Из фона (авто-recovery) старт
+            // может не пройти — тогда всё как раньше.
+            (state == ConnectionState.CONNECTING || state == ConnectionState.INITIALIZING) &&
+                currentTripId == null && standbySince == null -> {
+                runCatching { startService() }.onSuccess { standbySince = System.currentTimeMillis() }
+            }
+            // «Откл.» до того, как адаптер подключился, — сервис больше не нужен.
+            state == ConnectionState.DISCONNECTED && currentTripId == null && standbySince != null ->
+                stopStandbyLocked()
             // Переход → DISCONNECTED/ERROR с открытой сессией. Закрываем её ТОЛЬКО по
             // явному «Завершить»/«Откл.» (флаг в TripController). Иначе это обрыв:
             // вышли из машины, заглушили двигатель — OBD-сессия встаёт на паузу и
@@ -199,7 +238,9 @@ class AutoSessionManager @Inject constructor(
                     closeTripLocked()
                 } else {
                     if (controller.manualPause.value) manualPauseSawDisconnect = true
-                    if (!controller.gpsMode.value) controller.setPaused(true)
+                    // Пока машина едет и пишется по GPS, неудачные попытки переподключения
+                    // (CONNECTING → ERROR) паузу не ставят — её снимет/поставит сервис.
+                    if (!controller.gpsMode.value && !controller.gpsFallback.value) controller.setPaused(true)
                 }
             }
             // Возврат CONNECTED при уже открытой сессии (только на переходе, не на каждую
@@ -213,15 +254,23 @@ class AutoSessionManager @Inject constructor(
                     controller.setManualPause(false)
                     controller.setPaused(false)
                 }
+                controller.setGpsFallback(false)
             }
             else -> Unit
         }
+    }
+
+    /** Снятие сервиса, запущенного на время подключения. Только под [tripMutex]. */
+    private fun stopStandbyLocked() {
+        standbySince = null
+        stopService()
     }
 
     /** Закрытие текущей сессии. Вызывать только под [tripMutex]; повторный вызов — no-op. */
     private suspend fun closeTripLocked() {
         val id = currentTripId ?: return
         currentTripId = null
+        standbySince = null
         controller.onTripFinished()
         stopService()
         tracker.detach()

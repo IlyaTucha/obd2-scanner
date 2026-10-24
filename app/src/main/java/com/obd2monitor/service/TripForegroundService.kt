@@ -68,6 +68,8 @@ class TripForegroundService : Service() {
     private var writerJob: Job? = null
     private var obdCacheJob: Job? = null
     private var gpsRetryJob: Job? = null
+    private var notificationJob: Job? = null
+    private var shownNotification: Pair<String, String>? = null
     private var fusedClient: FusedLocationProviderClient? = null
     private val latestObd = MutableStateFlow(OBDData())
     private var lastLocation: Location? = null
@@ -84,6 +86,10 @@ class TripForegroundService : Service() {
      *  На Android 14+ FGS без типа location получает координаты только пока
      *  приложение видимо — поэтому при появлении разрешения тип надо повысить. */
     @Volatile private var fgsHasLocationType = false
+    /** true — startForeground уже выполнен (см. start()). */
+    private var isForeground = false
+    /** Сессия, в которую пишет writer; null — сервис ждёт подключения адаптера. */
+    @Volatile private var activeTripId: String? = null
     /**
      * Сглаживание GPS-дрожания на стоянке:
      *  - принимаем только точки с accuracy <= MAX_ACCURACY_M (если accuracy известен);
@@ -164,20 +170,30 @@ class TripForegroundService : Service() {
         // иначе startForeground() кидает SecurityException и сессия не пишется.
         // Если разрешения нет — стартуем как dataSync, чтобы продолжать запись OBD-readings
         // без координат. Иначе при отказе от GPS в истории сессии всё было по нулям.
-        val hasLocationPerm = hasFineLocation()
-        val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            if (hasLocationPerm) ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-            else ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-        } else 0
-        runCatching {
-            ServiceCompat.startForeground(
-                this,
-                NOTIFICATION_ID,
-                buildNotification(notificationText()),
-                fgsType,
-            )
-        }.onFailure { stopSelf(); return }
-        fgsHasLocationType = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || hasLocationPerm
+        //
+        // Повторный START (сервис уже поднят на время подключения, теперь открылась
+        // сессия) приходит, как правило, из фона: startForeground() там может кинуть
+        // исключение, а stopSelf() убил бы работающую запись. Уже в foreground — только
+        // обновляем текст уведомления.
+        if (isForeground) {
+            refreshNotification()
+        } else {
+            val hasLocationPerm = hasFineLocation()
+            val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                if (hasLocationPerm) ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+                else ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            } else 0
+            runCatching {
+                ServiceCompat.startForeground(
+                    this,
+                    NOTIFICATION_ID,
+                    buildNotification(notificationText()),
+                    fgsType,
+                )
+            }.onFailure { stopSelf(); return }
+            isForeground = true
+            fgsHasLocationType = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || hasLocationPerm
+        }
         lastFixAt = System.currentTimeMillis()  // даём первой подписке окно GPS_STALE_MS до проверки
         startGps()
         // GPS-watchdog на всю сессию. На ПЕРВОМ запуске сервис стартует параллельно с
@@ -207,6 +223,15 @@ class TripForegroundService : Service() {
         // сервиса, а reset() тут же её снял бы). Состоянием паузы владеют
         // AutoSessionManager и TripController.
 
+        // Уведомление следует за состоянием сессии (подготовка / запись / пауза).
+        notificationJob?.cancel()
+        notificationJob = scope.launch {
+            while (isActive) {
+                delay(2_000L)
+                refreshNotification()
+            }
+        }
+
         // Кэш последнего OBD-снимка (не блокируется отсутствием подключения)
         obdCacheJob?.cancel()
         obdCacheJob = obdRepo.liveData.onEach { latestObd.value = it }.launchIn(scope)
@@ -218,7 +243,10 @@ class TripForegroundService : Service() {
         // не велись бы пока сессия не пересоздастся; поэтому ждём filterNotNull().first().
         writerJob?.cancel()
         writerJob = scope.launch {
+            // Сервис, поднятый на время подключения, стоит здесь, пока не откроется сессия.
             val active = tripRepo.observeActiveTrip().filterNotNull().first()
+            activeTripId = active.id
+            refreshNotification()
             runCatching { tracker.attach(active.id) }
             while (isActive) {
                 val now = System.currentTimeMillis()
@@ -231,6 +259,7 @@ class TripForegroundService : Service() {
                 val obd = if (obdFresh) latestObd.value else OBDData()
                 val gpsSpeed = if (now - gpsSpeedAt < GPS_SPEED_MAX_AGE_MS) gpsSpeedKmh else 0f
                 if (controller.gpsMode.value && !obdFresh) updateGpsIdlePause(now, gpsSpeed)
+                else updateGpsFallback(now, gpsSpeed, obdFresh)
                 if (!controller.paused.value) {
                     val loc = lastLocation
                     // Пишем замер, если есть хоть что-то: свежие данные ЭБУ или координаты.
@@ -289,19 +318,81 @@ class TripForegroundService : Service() {
         if (now - since >= GPS_IDLE_PAUSE_MS && !controller.paused.value) controller.setPaused(true)
     }
 
+    /**
+     * OBD-сессия без связи с адаптером: если машина поехала (по GPS), снимаем паузу и
+     * пишем маршрут и скорость по спутникам, пока адаптер не вернётся. На стоянке
+     * дольше GPS_IDLE_PAUSE_MS — снова пауза, как у GPS-сессии. Ручную паузу не трогаем.
+     */
+    private fun updateGpsFallback(now: Long, gpsSpeed: Float, obdFresh: Boolean) {
+        if (controller.gpsMode.value) return
+        if (obdFresh || controller.manualPause.value) {
+            if (controller.gpsFallback.value) controller.setGpsFallback(false)
+            stationarySince = null
+            return
+        }
+        if (gpsSpeed >= GPS_RESUME_SPEED_KMH) {
+            stationarySince = null
+            if (!controller.gpsFallback.value) controller.setGpsFallback(true)
+            if (controller.paused.value) controller.setPaused(false)
+            return
+        }
+        if (!controller.gpsFallback.value) return
+        if (gpsSpeed >= TripMath.MOVING_THRESHOLD_KMH) {
+            stationarySince = null
+            return
+        }
+        val since = stationarySince ?: now.also { stationarySince = it }
+        if (now - since >= GPS_IDLE_PAUSE_MS) {
+            controller.setGpsFallback(false)
+            controller.setPaused(true)
+        }
+    }
+
     private fun stop() {
         writerJob?.cancel(); writerJob = null
         obdCacheJob?.cancel(); obdCacheJob = null
         gpsRetryJob?.cancel(); gpsRetryJob = null
+        notificationJob?.cancel(); notificationJob = null
         stopGps()
         controller.reset()
         scope.launch { tracker.detach() }
+        activeTripId = null
+        shownNotification = null
+        isForeground = false
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
-    private fun notificationText(): String =
-        if (controller.gpsMode.value) "Запись маршрута по GPS" else "Запись поездки"
+    private fun notificationTitle(): String =
+        if (activeTripId == null) "Подготовка к записи" else getString(R.string.trip_notification_title)
+
+    /** Текст уведомления — то же состояние, что на вкладке «Сессия» (StatusCard). */
+    private fun notificationText(): String {
+        val st = obdRepo.connectionStatus.value
+        val obdFlowing = st.state == ConnectionState.CONNECTED && st.lastSnapshotHadData
+        return when {
+            activeTripId == null -> "Подключение к адаптеру. Сессия начнётся сама."
+            controller.manualPause.value -> "Пауза"
+            controller.gpsMode.value ->
+                if (controller.paused.value) "Пауза: стоянка" else "Запись маршрута по GPS"
+            controller.gpsFallback.value && !controller.paused.value ->
+                "Адаптер не на связи — маршрут пишется по GPS"
+            st.state != ConnectionState.CONNECTED -> "Пауза: ожидание адаптера"
+            controller.paused.value || !obdFlowing -> "Пауза: нет данных от блока управления"
+            else -> "Запись поездки"
+        }
+    }
+
+    /** Перерисовывает уведомление, только если текст изменился. */
+    private fun refreshNotification() {
+        val shown = notificationTitle() to notificationText()
+        if (shown == shownNotification) return
+        shownNotification = shown
+        runCatching {
+            getSystemService(NotificationManager::class.java)
+                .notify(NOTIFICATION_ID, buildNotification(notificationText()))
+        }
+    }
 
     private fun hasFineLocation(): Boolean = ContextCompat.checkSelfPermission(
         this, Manifest.permission.ACCESS_FINE_LOCATION
@@ -389,7 +480,7 @@ class TripForegroundService : Service() {
     }
 
     private fun buildNotification(text: String) = NotificationCompat.Builder(this, CHANNEL_ID)
-        .setContentTitle(getString(R.string.trip_notification_title))
+        .setContentTitle(notificationTitle())
         .setContentText(text)
         .setSmallIcon(R.mipmap.ic_launcher_foreground)
         .setOngoing(true)

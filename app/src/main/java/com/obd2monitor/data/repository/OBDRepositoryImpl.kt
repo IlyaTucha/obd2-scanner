@@ -147,7 +147,14 @@ class OBDRepositoryImpl @Inject constructor(
     override val connectionStatus: StateFlow<ConnectionStatus> get() = _status.asStateFlow()
     override val liveData: SharedFlow<OBDData> get() = _liveData.asSharedFlow()
 
+    /** Подключение идёт в scope репозитория, а не вызывающего: MainActivity и экран
+     *  настроек зовут connect() из lifecycleScope/viewModelScope, и закрытие экрана
+     *  посреди handshake отменяло бы подключение. */
     override suspend fun connect(deviceAddress: String) {
+        scope.launch { connectInternal(deviceAddress) }.join()
+    }
+
+    private suspend fun connectInternal(deviceAddress: String) {
         // Идемпотентность: уже подключены к этому адресу и поллинг жив → ничего не
         // трогаем. Повторный вызов не должен сносить рабочий pollJob и сокет ради
         // холодного handshake заново. Activity на повороте/смене темы НЕ пересоздаётся
