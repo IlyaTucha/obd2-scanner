@@ -56,6 +56,7 @@ class OBDRepositoryImpl @Inject constructor(
     private var pollJob: Job? = null
     private var recoveryJob: Job? = null
     private var connectJob: Job? = null
+    private var connectAddress: String? = null
 
     // Антиспайк скорости (см. sanitizeSpeed). Поля защищены ioMutex —
     // readSnapshot/startPolling всегда работают под ним или последовательно.
@@ -153,8 +154,16 @@ class OBDRepositoryImpl @Inject constructor(
      *  настроек зовут connect() из lifecycleScope/viewModelScope, и закрытие экрана
      *  посреди handshake отменяло бы подключение. */
     override suspend fun connect(deviceAddress: String) {
-        val job = scope.launch { connectInternal(deviceAddress) }
-        connectJob = job
+        // Подключение к этому адаптеру уже идёт (автоподключение из AutoSessionManager
+        // при старте процесса и MainActivity) — ждём его, а не запускаем второе поверх
+        // того же сокета.
+        val job = synchronized(this) {
+            connectJob?.takeIf { it.isActive && connectAddress == deviceAddress }
+                ?: scope.launch { connectInternal(deviceAddress) }.also {
+                    connectJob = it
+                    connectAddress = deviceAddress
+                }
+        }
         job.join()
     }
 

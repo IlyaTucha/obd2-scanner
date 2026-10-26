@@ -183,6 +183,7 @@ class TripForegroundService : Service() {
                 if (hasLocationPerm) ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
                 else ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
             } else 0
+            var asLocation = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || hasLocationPerm
             runCatching {
                 ServiceCompat.startForeground(
                     this,
@@ -190,9 +191,22 @@ class TripForegroundService : Service() {
                     buildNotification(notificationText()),
                     fgsType,
                 )
+            }.recoverCatching {
+                // Старт без экрана (после перезагрузки телефона, см. BootReceiver): тип
+                // location из фона не разрешён без фонового доступа к геопозиции. Пишем
+                // OBD как dataSync; до location тип поднимет gpsRetryJob, когда
+                // приложение откроют.
+                if (fgsType != ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION) throw it
+                ServiceCompat.startForeground(
+                    this,
+                    NOTIFICATION_ID,
+                    buildNotification(notificationText()),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+                )
+                asLocation = false
             }.onFailure { stopSelf(); return }
             isForeground = true
-            fgsHasLocationType = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || hasLocationPerm
+            fgsHasLocationType = asLocation
         }
         lastFixAt = System.currentTimeMillis()  // даём первой подписке окно GPS_STALE_MS до проверки
         startGps()

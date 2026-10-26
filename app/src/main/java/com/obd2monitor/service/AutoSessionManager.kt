@@ -85,7 +85,7 @@ class AutoSessionManager @Inject constructor(
         // иначе первое же CONNECTED (auto-connect в MainActivity идёт параллельно)
         // открыло бы новую сессию, а старая осталась бы в БД незакрытой.
         scope.launch {
-            runCatching { tripMutex.withLock { adoptOrphanIfAny() } }
+            val adopted = runCatching { tripMutex.withLock { adoptOrphanIfAny() } }.getOrDefault(false)
             obdRepo.connectionStatus.onEach { status ->
                 val state = status.state
                 try {
@@ -103,6 +103,8 @@ class AutoSessionManager @Inject constructor(
                     prefs.setManualPauseTripId(null)
                 }
             }.launchIn(scope)
+            // Уже после подписки на статус — чтобы переходы подключения не прошли мимо.
+            if (adopted) connectToLastAdapter()
         }
 
         // Watchdog «частичного разрыва»: CONNECTED, но данные не идут >10 c — пауза.
@@ -181,6 +183,7 @@ class AutoSessionManager @Inject constructor(
         val profile = vehicleRepo.observeActive().firstOrNull() ?: return@withLock
         val tripId = startTrip(profile.id)
         currentTripId = tripId
+        BootReceiver.setEnabled(context, true)
         prefs.setGpsTripId(tripId)
         controller.onTripStarted(tripId, gpsMode = true)
         startService()
@@ -211,6 +214,7 @@ class AutoSessionManager @Inject constructor(
                 val profile = vehicleRepo.observeActive().firstOrNull() ?: return
                 val tripId = startTrip(profile.id)
                 currentTripId = tripId
+                BootReceiver.setEnabled(context, true)
                 controller.onTripStarted(tripId)
                 // Сервис обычно уже работает с момента подключения и сам подхватит
                 // сессию. Повторный старт из фона Android может запретить — не страшно.
@@ -270,6 +274,7 @@ class AutoSessionManager @Inject constructor(
     private suspend fun closeTripLocked() {
         val id = currentTripId ?: return
         currentTripId = null
+        BootReceiver.setEnabled(context, false)
         standbySince = null
         controller.onTripFinished()
         stopService()
@@ -283,17 +288,22 @@ class AutoSessionManager @Inject constructor(
      *  активным в памяти, иначе следующий коннект создаст новый trip и старый зависнет.
      *  Без записей дольше 8 ч — закрываем сразу, чтобы не считать простой «паузой»;
      *  поездку на ручной паузе оставляем открытой сколько угодно. */
-    private suspend fun adoptOrphanIfAny() {
-        val orphan = tripRepo.getActiveTripOnce() ?: return
+    private suspend fun adoptOrphanIfAny(): Boolean {
+        val orphan = tripRepo.getActiveTripOnce()
+        // Приёмник загрузки нужен, только пока есть открытая поездка (см. BootReceiver).
+        // Здесь — и для поездок, открытых до появления приёмника.
+        BootReceiver.setEnabled(context, orphan != null)
+        if (orphan == null) return false
         val gpsTripId = prefs.gpsTripId.first()
         val manual = prefs.manualPauseTripId.first() == orphan.id
         val now = System.currentTimeMillis()
         val lastReadingTs = tripRepo.lastReadingTimestamp(orphan.id)
         if (!manual && now - (lastReadingTs ?: orphan.startTime) > ORPHAN_MAX_AGE_MS) {
             finishTrip(orphan.id)
+            BootReceiver.setEnabled(context, false)
             prefs.setGpsTripId(null)
             prefs.setManualPauseTripId(null)
-            return
+            return false
         }
         // Простой между последней записью и текущим моментом — это время, когда
         // приложение было убито. Записей не было — засчитываем как паузу, иначе UI
@@ -310,7 +320,25 @@ class AutoSessionManager @Inject constructor(
         // Процесс перезапущен — адаптер заведомо отключён, следующее подключение
         // снимет ручную паузу.
         manualPauseSawDisconnect = manual
-        startService()
+        // Процесс мог подняться сам, без экрана (после перезагрузки телефона — см.
+        // BootReceiver): из фона Android может не дать стартовать foreground-сервису.
+        // Сессию это не отменяет — сервис поднимется при открытии приложения.
+        runCatching { startService() }
+        return true
+    }
+
+    /**
+     * Подключение к последнему адаптеру без открытого приложения, когда есть поездка,
+     * ждущая продолжения. Раньше подключение запускала только MainActivity: телефон
+     * перезагрузился на стоянке — и обратная дорога не писалась, пока приложение не
+     * откроют. Адаптер сейчас без питания (двигатель заглушен) — не страшно:
+     * OBDRepository повторяет попытки сам (scheduleRecovery), пока машину не заведут.
+     */
+    private suspend fun connectToLastAdapter() {
+        if (!prefs.autoConnect.first()) return
+        val addr = prefs.lastDeviceAddress.first()?.takeIf { it.isNotBlank() } ?: return
+        if (obdRepo.connectionStatus.value.state != ConnectionState.DISCONNECTED) return
+        runCatching { obdRepo.connect(addr) }
     }
 
     private fun startService() {
