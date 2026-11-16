@@ -40,6 +40,7 @@ data class TripUiState(
     val pauseSinceMs: Long? = null,
     /** Пауза поставлена кнопкой «Пауза»: без авто-завершения. */
     val manualPause: Boolean = false,
+    val androidAutoTrip: Boolean = false,
     /** Сессия записывается по GPS (начата без адаптера). */
     val gpsMode: Boolean = false,
     /** OBD-сессия временно пишется по GPS: адаптер не на связи, а машина едет. */
@@ -120,6 +121,7 @@ class TripViewModel @Inject constructor(
         controller.paused.onEach { update { copy(paused = it) } }.launchIn(viewModelScope)
         controller.pauseSinceMs.onEach { update { copy(pauseSinceMs = it) } }.launchIn(viewModelScope)
         controller.manualPause.onEach { update { copy(manualPause = it) } }.launchIn(viewModelScope)
+        controller.androidAutoTrip.onEach { update { copy(androidAutoTrip = it) } }.launchIn(viewModelScope)
         controller.gpsMode.onEach { update { copy(gpsMode = it) } }.launchIn(viewModelScope)
         controller.gpsFallback.onEach { update { copy(gpsFallback = it) } }.launchIn(viewModelScope)
         controller.lastGpsFixAt.onEach { update { copy(lastGpsFixAt = it) } }.launchIn(viewModelScope)

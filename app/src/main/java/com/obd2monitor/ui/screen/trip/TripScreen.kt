@@ -297,9 +297,14 @@ private fun StatusCard(state: TripUiState, onFinish: () -> Unit, onPause: () -> 
         (state.lastGpsFixAt == null || now - state.lastGpsFixAt > GPS_WAIT_HINT_MS)
     // OBD-сессия без адаптера, которая пишется по GPS, на паузе только по факту паузы.
     val gpsFallback = state.gpsFallback && !obdFlowing
-    val paused = if (state.gpsMode || gpsFallback) state.paused else state.paused || !obdFlowing
+    val paused = if (state.androidAutoTrip || state.gpsMode || gpsFallback) state.paused
+        else state.paused || !obdFlowing
 
     val (color, title, hint) = when {
+        state.androidAutoTrip && state.manualPause -> Triple(ColorWarning, "Пауза",
+            "Нажмите «Продолжить», чтобы возобновить запись при подключении Android Auto.")
+        state.androidAutoTrip && paused -> Triple(ColorWarning, "Пауза: ожидание Android Auto или OBD",
+            "Запись продолжится после восстановления связи с магнитолой и адаптером.")
         state.manualPause -> Triple(ColorWarning, "Пауза",
             if (state.gpsMode) "Поездка не завершится сама. Запись продолжится, когда автомобиль поедет, или по кнопке «Продолжить»."
             else "Поездка не завершится сама. Запись продолжится при следующем запуске двигателя или по кнопке «Продолжить».")
@@ -330,7 +335,8 @@ private fun StatusCard(state: TripUiState, onFinish: () -> Unit, onPause: () -> 
             Box(Modifier.size(10.dp).clip(CircleShape).background(color))
             Spacer(Modifier.width(8.dp))
             Text(title, color = color, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-            Text(if (state.gpsMode) "GPS" else "OBD", color = ColorTextSecondary, style = MaterialTheme.typography.labelMedium)
+            val source = if (state.gpsMode && !state.androidAutoTrip) "GPS" else "OBD"
+            Text(source, color = ColorTextSecondary, style = MaterialTheme.typography.labelMedium)
         }
         Spacer(Modifier.height(10.dp))
         Text(formatHms(state.durationMs), style = MaterialTheme.typography.displaySmall)
@@ -343,7 +349,7 @@ private fun StatusCard(state: TripUiState, onFinish: () -> Unit, onPause: () -> 
         Text(hint, color = ColorTextSecondary, style = MaterialTheme.typography.bodySmall)
         // Обратный отсчёт до авто-завершения долгой автопаузы; ручная пауза не ограничена.
         val pauseSince = state.pauseSinceMs
-        if (paused && !state.manualPause && pauseSince != null) {
+        if (paused && !state.manualPause && !state.androidAutoTrip && pauseSince != null) {
             val remainingMs = (TripController.AUTO_FINISH_PAUSE_MS - (now - pauseSince)).coerceAtLeast(0L)
             Text(
                 "Если запись не возобновится, сессия завершится автоматически через ${formatPauseRemaining(remainingMs)}.",

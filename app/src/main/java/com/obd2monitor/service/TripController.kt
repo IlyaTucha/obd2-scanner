@@ -59,6 +59,12 @@ class TripController @Inject constructor(
      *  AutoSessionManager). */
     val manualPause: StateFlow<Boolean> = _manualPause.asStateFlow()
 
+    private val _androidAutoTrip = MutableStateFlow(false)
+    /** Поездка по OBD, для которой отключение Android Auto ставит запись на паузу. */
+    val androidAutoTrip: StateFlow<Boolean> = _androidAutoTrip.asStateFlow()
+
+    fun setAndroidAutoTrip(value: Boolean) { _androidAutoTrip.value = value }
+
     private val _gpsMode = MutableStateFlow(false)
     /** Сессия начата вручную кнопкой «Запись по GPS». В этом режиме обрыв OBD не
      *  ставит запись на паузу — маршрут, скорость и пробег пишутся по спутникам. */
@@ -74,7 +80,8 @@ class TripController @Inject constructor(
     /** Время последнего принятого GPS-фикса — UI показывает «ожидание сигнала GPS». */
     val lastGpsFixAt: StateFlow<Long?> = _lastGpsFixAt.asStateFlow()
 
-    private var currentTripId: String? = null
+    private val _activeTripId = MutableStateFlow<String?>(null)
+    val activeTripId: StateFlow<String?> = _activeTripId.asStateFlow()
     // Несбросанный delta-pause, который ещё не записали в DB. Флашим раз в FLUSH_EVERY_MS,
     // чтобы не делать update раз в 500 мс.
     private var unflushedPauseMs: Long = 0L
@@ -89,25 +96,6 @@ class TripController @Inject constructor(
         private const val FLUSH_EVERY_MS = 5000L
     }
 
-    /**
-     * Флаг «пользователь явно нажал Завершить». Взводится из UI ПЕРЕД вызовом
-     * obdRepo.disconnect(); AutoSessionManager при переходе CONNECTED→DISCONNECTED
-     * читает и сбрасывает его. true → закрыть trip; false → просто пауза.
-     *
-     * Зачем: BT-соединение может оборваться не только по воле пользователя
-     * (отошёл от машины, заглушил двигатель — питание ELM пропало). В этих
-     * случаях нельзя автоматически закрывать сессию — пользователь продолжит
-     * запись, когда вернётся. Закрытие должно быть явным жестом.
-     */
-    private val _finishRequested = MutableStateFlow(false)
-
-    fun requestFinish() { _finishRequested.value = true }
-    fun consumeFinishRequest(): Boolean {
-        val v = _finishRequested.value
-        _finishRequested.value = false
-        return v
-    }
-
     init {
         scope.launch {
             var lastTick = System.currentTimeMillis()
@@ -117,7 +105,7 @@ class TripController @Inject constructor(
                 val now = System.currentTimeMillis()
                 val delta = (now - lastTick).coerceAtLeast(0)
                 lastTick = now
-                val tripId = currentTripId
+                val tripId = _activeTripId.value
                 if (tripId != null) {
                     if (_paused.value) {
                         _pausedMs.value = _pausedMs.value + delta
@@ -161,7 +149,6 @@ class TripController @Inject constructor(
 
     /** Вызывать при старте новой сессии. Сбрасывает счётчик. */
     fun onTripStarted(tripId: String, gpsMode: Boolean = false) {
-        currentTripId = tripId
         _gpsMode.value = gpsMode
         _gpsFallback.value = false
         _lastGpsFixAt.value = null
@@ -172,14 +159,13 @@ class TripController @Inject constructor(
         _paused.value = false
         _manualPause.value = false
         _pauseSinceMs.value = null
-        _finishRequested.value = false
+        _activeTripId.value = tripId
     }
 
     /** Усыновление осиротевшей сессии после force-stop'а. Подхватывает уже
      *  накопленные durationMs/pausedMs из БД, чтобы UI показывал корректное
      *  время (а не «00:00:00» сразу после рестарта приложения). */
     fun onTripAdopted(tripId: String, startTime: Long, pausedMsSoFar: Long, gpsMode: Boolean, manualPause: Boolean) {
-        currentTripId = tripId
         _gpsMode.value = gpsMode
         _gpsFallback.value = false
         _lastGpsFixAt.value = null
@@ -197,14 +183,14 @@ class TripController @Inject constructor(
         // pausedMsSoFar уже содержит downtime (см. AutoSessionManager.adoptOrphanIfAny),
         // и иначе watchdog мгновенно бы триггерил auto-finish.
         _pauseSinceMs.value = now
-        _finishRequested.value = false
+        _activeTripId.value = tripId
     }
 
     /** Вызывать при завершении сессии. Останавливает счётчик. */
-    fun onTripFinished() {
-        val tripId = currentTripId
+    suspend fun onTripFinished() {
+        val tripId = _activeTripId.value
         val toFlush = unflushedPauseMs
-        currentTripId = null
+        _activeTripId.value = null
         unflushedPauseMs = 0L
         _gpsMode.value = false
         _gpsFallback.value = false
@@ -212,15 +198,9 @@ class TripController @Inject constructor(
         _paused.value = false
         _manualPause.value = false
         _pauseSinceMs.value = null
-        _finishRequested.value = false
         // Финальный flush, чтобы итоговое pausedMs было точным.
         if (tripId != null && toFlush > 0) {
-            scope.launch { runCatching { tripRepoProvider.get().addPausedMs(tripId, toFlush) } }
+            runCatching { tripRepoProvider.get().addPausedMs(tripId, toFlush) }
         }
-    }
-
-    fun reset() {
-        _paused.value = false
-        _gpsFallback.value = false
     }
 }

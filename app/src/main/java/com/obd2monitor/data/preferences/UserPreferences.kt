@@ -19,14 +19,21 @@ class UserPreferences @Inject constructor(
 ) {
     private object Keys {
         val LAST_DEVICE = stringPreferencesKey("last_device_address")
-        val LAST_DEVICE_NAME = stringPreferencesKey("last_device_name")
         val AUTO_CONNECT = booleanPreferencesKey("auto_connect")
+        val ANDROID_AUTO_CONNECT = booleanPreferencesKey("android_auto_connect")
+        val ANDROID_AUTO_TRIP_ID = stringPreferencesKey("android_auto_trip_id")
+        val ANDROID_AUTO_FINISHED = booleanPreferencesKey("android_auto_finished")
         val GPS_TRIP_ID = stringPreferencesKey("gps_trip_id")
         val MANUAL_PAUSE_TRIP_ID = stringPreferencesKey("manual_pause_trip_id")
     }
 
     val lastDeviceAddress: Flow<String?> = context.dataStore.data.map { it[Keys.LAST_DEVICE] }
     val autoConnect: Flow<Boolean> = context.dataStore.data.map { it[Keys.AUTO_CONNECT] ?: true }
+    val androidAutoConnect: Flow<Boolean> =
+        context.dataStore.data.map { it[Keys.ANDROID_AUTO_CONNECT] ?: true }
+    val androidAutoTripId: Flow<String?> = context.dataStore.data.map { it[Keys.ANDROID_AUTO_TRIP_ID] }
+    val androidAutoFinished: Flow<Boolean> =
+        context.dataStore.data.map { it[Keys.ANDROID_AUTO_FINISHED] ?: false }
     /** id открытой GPS-сессии — чтобы после перезапуска процесса продолжить её в том же
      *  режиме, а не ждать подключения адаптера. */
     val gpsTripId: Flow<String?> = context.dataStore.data.map { it[Keys.GPS_TRIP_ID] }
@@ -34,14 +41,23 @@ class UserPreferences @Inject constructor(
      *  автоматически через AUTO_FINISH_PAUSE_MS. */
     val manualPauseTripId: Flow<String?> = context.dataStore.data.map { it[Keys.MANUAL_PAUSE_TRIP_ID] }
 
-    suspend fun setLastDevice(address: String?, name: String?) {
-        context.dataStore.edit { p ->
-            if (address == null) p.remove(Keys.LAST_DEVICE) else p[Keys.LAST_DEVICE] = address
-            if (name == null) p.remove(Keys.LAST_DEVICE_NAME) else p[Keys.LAST_DEVICE_NAME] = name
-        }
+    suspend fun setLastDevice(address: String) = context.dataStore.edit {
+        it[Keys.LAST_DEVICE] = address
     }
 
     suspend fun setAutoConnect(value: Boolean) = context.dataStore.edit { it[Keys.AUTO_CONNECT] = value }
+
+    suspend fun setAndroidAutoConnect(value: Boolean) = context.dataStore.edit {
+        it[Keys.ANDROID_AUTO_CONNECT] = value
+    }
+
+    suspend fun setAndroidAutoTripId(id: String?) = context.dataStore.edit {
+        if (id == null) it.remove(Keys.ANDROID_AUTO_TRIP_ID) else it[Keys.ANDROID_AUTO_TRIP_ID] = id
+    }
+
+    suspend fun setAndroidAutoFinished(value: Boolean) = context.dataStore.edit {
+        it[Keys.ANDROID_AUTO_FINISHED] = value
+    }
 
     suspend fun setGpsTripId(id: String?) = context.dataStore.edit { p ->
         if (id == null) p.remove(Keys.GPS_TRIP_ID) else p[Keys.GPS_TRIP_ID] = id

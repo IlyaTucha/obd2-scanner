@@ -13,7 +13,7 @@ import com.obd2monitor.domain.model.EcuInfo
 import com.obd2monitor.domain.model.VehicleProfile
 import com.obd2monitor.domain.repository.OBDRepository
 import com.obd2monitor.domain.repository.VehicleProfileRepository
-import com.obd2monitor.service.TripController
+import com.obd2monitor.service.AutoSessionManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -27,7 +27,9 @@ import javax.inject.Inject
 
 data class SettingsUiState(
     val pairedDevices: List<DeviceInfo> = emptyList(),
+    val lastDeviceAddress: String? = null,
     val autoConnect: Boolean = true,
+    val androidAutoConnect: Boolean = true,
     val ecuInfo: EcuInfo? = null,
     val ecuLoading: Boolean = false,
 )
@@ -40,7 +42,7 @@ class SettingsViewModel @Inject constructor(
     private val vehicleRepo: VehicleProfileRepository,
     private val obdRepo: OBDRepository,
     private val prefs: UserPreferences,
-    private val tripController: TripController,
+    private val sessions: AutoSessionManager,
     private val backup: DatabaseBackupManager,
 ) : ViewModel() {
 
@@ -86,6 +88,12 @@ class SettingsViewModel @Inject constructor(
 
     init {
         prefs.autoConnect.onEach { _state.value = _state.value.copy(autoConnect = it) }.launchIn(viewModelScope)
+        prefs.lastDeviceAddress.onEach { address ->
+            _state.value = _state.value.copy(lastDeviceAddress = address)
+        }.launchIn(viewModelScope)
+        prefs.androidAutoConnect.onEach {
+            _state.value = _state.value.copy(androidAutoConnect = it)
+        }.launchIn(viewModelScope)
         // При подключении автоматически читаем паспорт ECU.
         obdRepo.connectionStatus.onEach { st ->
             if (st.state == ConnectionState.CONNECTED && _state.value.ecuInfo == null) {
@@ -107,18 +115,14 @@ class SettingsViewModel @Inject constructor(
         DeviceInfo(name = name ?: "Unknown", address = address)
     } catch (_: SecurityException) { null }
 
-    fun connect(address: String, name: String) {
+    fun connect(address: String) {
         viewModelScope.launch {
-            prefs.setLastDevice(address, name)
             obdRepo.connect(address)
         }
     }
 
     fun disconnect() {
-        // Кнопка «Откл.» в настройках — явный жест: помечаем как finish, чтобы
-        // AutoSessionManager закрыл текущий trip. См. TripController.requestFinish.
-        tripController.requestFinish()
-        viewModelScope.launch { obdRepo.disconnect() }
+        viewModelScope.launch { sessions.disconnectAdapter() }
     }
 
     fun setActiveProfile(id: String) {
@@ -136,6 +140,10 @@ class SettingsViewModel @Inject constructor(
 
     fun setAutoConnect(value: Boolean) {
         viewModelScope.launch { prefs.setAutoConnect(value) }
+    }
+
+    fun setAndroidAutoConnect(value: Boolean) {
+        viewModelScope.launch { sessions.setAndroidAutoConnect(value) }
     }
 
     fun loadEcuInfo() {

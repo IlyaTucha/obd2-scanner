@@ -49,6 +49,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -107,6 +110,8 @@ fun SettingsScreen(
                 isConnected = isConnected,
                 autoConnect = state.autoConnect,
                 onAutoConnectChange = viewModel::setAutoConnect,
+                androidAutoConnect = state.androidAutoConnect,
+                onAndroidAutoConnectChange = viewModel::setAndroidAutoConnect,
                 connectingAddress = conn.deviceAddress?.takeIf {
                     conn.state == ConnectionState.CONNECTING ||
                         conn.state == ConnectionState.INITIALIZING
@@ -117,6 +122,7 @@ fun SettingsScreen(
                     else -> null
                 },
                 currentAddress = conn.deviceAddress,
+                lastDeviceAddress = state.lastDeviceAddress,
                 devices = state.pairedDevices,
                 onRefresh = viewModel::refreshDevices,
                 onConnect = viewModel::connect,
@@ -316,12 +322,15 @@ private fun ConnectionBody(
     isConnected: Boolean,
     autoConnect: Boolean,
     onAutoConnectChange: (Boolean) -> Unit,
+    androidAutoConnect: Boolean,
+    onAndroidAutoConnectChange: (Boolean) -> Unit,
     connectingAddress: String?,
     connectingStage: String?,
     currentAddress: String?,
+    lastDeviceAddress: String?,
     devices: List<DeviceInfo>,
     onRefresh: () -> Unit,
-    onConnect: (String, String) -> Unit,
+    onConnect: (String) -> Unit,
     onDisconnect: () -> Unit,
 ) {
     Column {
@@ -340,12 +349,24 @@ private fun ConnectionBody(
             Column(Modifier.weight(1f)) {
                 Text("Подключаться автоматически", style = MaterialTheme.typography.bodyMedium)
                 Text(
-                    "При запуске приложения — к последнему адаптеру",
+                    "При запуске приложения — к последнему подключённому OBD-адаптеру",
                     color = ColorTextSecondary,
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
             Switch(checked = autoConnect, onCheckedChange = onAutoConnectChange)
+        }
+        HorizontalDivider(color = ColorTextSecondary.copy(alpha = 0.2f))
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 8.dp)) {
+            Column(Modifier.weight(1f)) {
+                Text("Автоматическое подключение через Android Auto", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    "При подключении магнитолы — к последнему подключённому OBD-адаптеру",
+                    color = ColorTextSecondary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Switch(checked = androidAutoConnect, onCheckedChange = onAndroidAutoConnectChange)
         }
         HorizontalDivider(color = ColorTextSecondary.copy(alpha = 0.2f))
         if (devices.isEmpty()) {
@@ -365,13 +386,21 @@ private fun ConnectionBody(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable(enabled = connectingAddress == null && !isConnected) {
-                            onConnect(dev.address, dev.name)
+                            onConnect(dev.address)
                         }
                         .padding(vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Text(dev.name, style = MaterialTheme.typography.bodyMedium)
+                        val name = buildAnnotatedString {
+                            append(dev.name)
+                            if (dev.address.equals(lastDeviceAddress, ignoreCase = true)) {
+                                withStyle(SpanStyle(color = ColorTextSecondary)) {
+                                    append(" (посл. подкл.)")
+                                }
+                            }
+                        }
+                        Text(name, style = MaterialTheme.typography.bodyMedium)
                         Text(
                             dev.address,
                             color = ColorTextSecondary,

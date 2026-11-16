@@ -7,9 +7,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
-import com.obd2monitor.data.preferences.UserPreferences
-import com.obd2monitor.domain.repository.OBDRepository
+import com.obd2monitor.service.AutoSessionManager
 import com.obd2monitor.ui.navigation.AppNavigation
 import com.obd2monitor.ui.theme.OBD2Theme
 import dagger.hilt.android.AndroidEntryPoint
@@ -20,8 +20,7 @@ import javax.inject.Inject
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
-    @Inject lateinit var prefs: UserPreferences
-    @Inject lateinit var obdRepo: OBDRepository
+    @Inject lateinit var sessions: AutoSessionManager
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -34,7 +33,10 @@ class MainActivity : ComponentActivity() {
         setContent {
             OBD2Theme { AppNavigation() }
         }
-        lifecycleScope.launch { attemptAutoConnect() }
+        lifecycleScope.launch {
+            lifecycle.currentStateFlow.first { it.isAtLeast(Lifecycle.State.RESUMED) }
+            sessions.onPhoneOpened()
+        }
     }
 
     private fun requestRuntimePermissions() {
@@ -43,18 +45,11 @@ class MainActivity : ComponentActivity() {
             perms += Manifest.permission.BLUETOOTH_CONNECT
             perms += Manifest.permission.BLUETOOTH_SCAN
         }
+        perms += Manifest.permission.ACCESS_COARSE_LOCATION
         perms += Manifest.permission.ACCESS_FINE_LOCATION
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             perms += Manifest.permission.POST_NOTIFICATIONS
         }
         permissionLauncher.launch(perms.toTypedArray())
-    }
-
-    private suspend fun attemptAutoConnect() {
-        val auto = prefs.autoConnect.first()
-        val addr = prefs.lastDeviceAddress.first()
-        if (auto && !addr.isNullOrBlank()) {
-            runCatching { obdRepo.connect(addr) }
-        }
     }
 }

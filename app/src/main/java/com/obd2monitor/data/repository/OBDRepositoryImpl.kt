@@ -6,6 +6,7 @@ import com.obd2monitor.data.obd.FuelCalculator
 import com.obd2monitor.data.obd.OBDCommand
 import com.obd2monitor.data.obd.OBDParser
 import com.obd2monitor.data.obd.PIDRepository
+import com.obd2monitor.data.preferences.UserPreferences
 import com.obd2monitor.domain.model.ConnectionState
 import com.obd2monitor.domain.model.ConnectionStatus
 import com.obd2monitor.domain.model.DTCStatus
@@ -46,6 +47,7 @@ class OBDRepositoryImpl @Inject constructor(
     private val pids: PIDRepository,
     private val vehicleRepo: VehicleProfileRepository,
     private val dtcRepo: DTCRepository,
+    private val prefs: UserPreferences,
 ) : OBDRepository {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -333,7 +335,13 @@ class OBDRepositoryImpl @Inject constructor(
                 if (i == 0 && !settleFirst) ioMutex.withLock { runCatching { bt.close() } }
                 else resetSocketState()
                 bt.connect(addr)
-                return handshakeOrThrow(preferred)
+                val init = handshakeOrThrow(preferred)
+                try {
+                    prefs.setLastDevice(addr)
+                } catch (_: IOException) {
+                    // Ошибка сохранения адреса не отменяет рабочее подключение.
+                }
+                return init
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 last = t

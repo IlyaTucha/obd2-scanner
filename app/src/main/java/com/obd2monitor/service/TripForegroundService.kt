@@ -35,10 +35,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.filterNotNull
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.isActive
@@ -63,6 +63,7 @@ class TripForegroundService : Service() {
     @Inject lateinit var obdRepo: OBDRepository
     @Inject lateinit var controller: TripController
     @Inject lateinit var tracker: ActiveTripTracker
+    @Inject lateinit var sessions: AutoSessionManager
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var writerJob: Job? = null
@@ -158,7 +159,7 @@ class TripForegroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> start()
+            ACTION_START, null -> start()
             ACTION_STOP -> stop()
         }
         return START_STICKY
@@ -208,8 +209,10 @@ class TripForegroundService : Service() {
             isForeground = true
             fgsHasLocationType = asLocation
         }
+        sessions.onRecorderReady(true)
+        if (writerJob?.isActive == true) return
         lastFixAt = System.currentTimeMillis()  // даём первой подписке окно GPS_STALE_MS до проверки
-        startGps()
+        if (shouldUseGps()) startGps()
         // GPS-watchdog на всю сессию. На ПЕРВОМ запуске сервис стартует параллельно с
         // диалогом runtime-разрешений (MainActivity делает auto-connect, не дожидаясь
         // ответа пользователя) — startGps() выше молча выходит без ACCESS_FINE_LOCATION.
@@ -225,6 +228,10 @@ class TripForegroundService : Service() {
         gpsRetryJob = scope.launch {
             while (isActive) {
                 delay(5_000L)
+                if (!shouldUseGps()) {
+                    if (gpsSubscribed) stopGps()
+                    continue
+                }
                 if (!fgsHasLocationType && hasFineLocation()) upgradeToLocationFgs()
                 when {
                     !gpsSubscribed -> startGps()
@@ -232,11 +239,6 @@ class TripForegroundService : Service() {
                 }
             }
         }
-        // НЕ вызываем controller.reset() — он сбросил бы paused=false и сломал бы
-        // усыновление осиротевшей сессии (onTripAdopted ставит паузу ДО старта
-        // сервиса, а reset() тут же её снял бы). Состоянием паузы владеют
-        // AutoSessionManager и TripController.
-
         // Уведомление следует за состоянием сессии (подготовка / запись / пауза).
         notificationJob?.cancel()
         notificationJob = scope.launch {
@@ -250,71 +252,79 @@ class TripForegroundService : Service() {
         obdCacheJob?.cancel()
         obdCacheJob = obdRepo.liveData.onEach { latestObd.value = it }.launchIn(scope)
 
-        // Периодическая запись reading'ов.
-        // Ждём появления активного trip'а (AutoSessionManager создаёт его параллельно со
-        // стартом сервиса — на момент start() observeActiveTrip может ещё не успеть
-        // эмитнуть). С firstOrNull он вернул бы null и writer молча вышел бы → записи
-        // не велись бы пока сессия не пересоздастся; поэтому ждём filterNotNull().first().
+        // Сервис Android Auto ждёт и следующей сессии после «Завершить».
         writerJob?.cancel()
         writerJob = scope.launch {
-            // Сервис, поднятый на время подключения, стоит здесь, пока не откроется сессия.
-            val active = tripRepo.observeActiveTrip().filterNotNull().first()
-            activeTripId = active.id
-            refreshNotification()
-            runCatching { tracker.attach(active.id) }
-            while (isActive) {
-                val now = System.currentTimeMillis()
-                val status = obdRepo.connectionStatus.value
-                // OBD-снимок пишем, только пока он свежий: после обрыва в latestObd
-                // остаётся последнее значение, и GPS-сессия иначе тянула бы его дальше.
-                val obdFresh = status.state == ConnectionState.CONNECTED &&
-                    status.lastSnapshotHadData &&
-                    now - (status.lastSnapshotAt ?: 0L) < OBD_FRESH_MS
-                val obd = if (obdFresh) latestObd.value else OBDData()
-                val gpsSpeed = if (now - gpsSpeedAt < GPS_SPEED_MAX_AGE_MS) gpsSpeedKmh else 0f
-                if (controller.gpsMode.value && !obdFresh) updateGpsIdlePause(now, gpsSpeed)
-                else updateGpsFallback(now, gpsSpeed, obdFresh)
-                if (!controller.paused.value) {
-                    val loc = lastLocation
-                    // Пишем замер, если есть хоть что-то: свежие данные ЭБУ или координаты.
-                    val hasObd = obd.speedKmh != null || obd.rpm != null ||
-                        obd.coolantTempC != null || obd.engineLoadPercent != null ||
-                        obd.batteryVoltage != null || obd.throttlePercent != null ||
-                        obd.mapKpa != null || obd.intakeTempC != null
-                    if (hasObd || loc != null) {
-                        val reading = OBDReading(
-                            tripId = active.id,
-                            timestamp = now,
-                            // Скорость ЭБУ точнее на малых скоростях; GPS — запасной источник.
-                            speedKmh = obd.speedKmh ?: gpsSpeed,
-                            rpm = (obd.rpm ?: 0).toFloat(),
-                            coolantTempC = (obd.coolantTempC ?: 0).toFloat(),
-                            throttlePercent = obd.throttlePercent ?: 0f,
-                            fuelLevelPercent = obd.fuelLevelPercent ?: 0f,
-                            mafGs = obd.mafGs ?: 0f,
-                            instantFuelLPer100 = obd.instantFuelLPer100 ?: 0f,
-                            batteryVoltage = obd.batteryVoltage ?: 0f,
-                            engineLoadPercent = obd.engineLoadPercent ?: 0f,
-                            intakeTempC = (obd.intakeTempC ?: 0).toFloat(),
-                            mapKpa = (obd.mapKpa ?: 0).toFloat(),
-                            ignitionTimingDeg = obd.ignitionTimingDeg ?: 0f,
-                            oilTempC = (obd.oilTempC ?: 0).toFloat(),
-                            shortFuelTrim1Pct = obd.shortFuelTrim1Pct ?: 0f,
-                            longFuelTrim1Pct = obd.longFuelTrim1Pct ?: 0f,
-                            distanceMilKm = (obd.distanceMilKm ?: 0).toFloat(),
-                            distanceSinceClearKm = (obd.distanceSinceClearKm ?: 0).toFloat(),
-                            latitude = loc?.latitude,
-                            longitude = loc?.longitude,
-                        )
-                        tripRepo.appendReading(reading)
-                        runCatching { tracker.onReading(reading) }
-                    }
-                }
-                // Без адаптера данные приходят только с GPS (фикс раз в 2 c) — чаще писать незачем.
-                delay(if (obdFresh) WRITE_INTERVAL_MS else GPS_WRITE_INTERVAL_MS)
+            controller.activeTripId.collectLatest { id ->
+                activeTripId = id
+                refreshNotification()
+                if (id != null) recordTrip(id)
             }
         }
     }
+
+    private suspend fun recordTrip(tripId: String) {
+        tracker.attach(tripId)
+        while (currentCoroutineContext().isActive) {
+            val now = System.currentTimeMillis()
+            val status = obdRepo.connectionStatus.value
+            // OBD-снимок пишем, только пока он свежий: после обрыва в latestObd
+            // остаётся последнее значение, и GPS-сессия иначе тянула бы его дальше.
+            val obdFresh = status.state == ConnectionState.CONNECTED &&
+                status.lastSnapshotHadData &&
+                now - (status.lastSnapshotAt ?: 0L) < OBD_FRESH_MS
+            val obd = if (obdFresh) latestObd.value else OBDData()
+            val gpsSpeed = if (now - gpsSpeedAt < GPS_SPEED_MAX_AGE_MS) gpsSpeedKmh else 0f
+            if (!controller.androidAutoTrip.value) {
+                if (controller.gpsMode.value && !obdFresh) updateGpsIdlePause(now, gpsSpeed)
+                else updateGpsFallback(now, gpsSpeed, obdFresh)
+            }
+            if (controller.activeTripId.value == tripId && !controller.paused.value) {
+                val loc = lastLocation?.takeIf {
+                    !controller.androidAutoTrip.value || now - gpsSpeedAt < GPS_SPEED_MAX_AGE_MS
+                }
+                // Пишем замер, если есть хоть что-то: свежие данные ЭБУ или координаты.
+                val hasObd = obd.speedKmh != null || obd.rpm != null ||
+                    obd.coolantTempC != null || obd.engineLoadPercent != null ||
+                    obd.batteryVoltage != null || obd.throttlePercent != null ||
+                    obd.mapKpa != null || obd.intakeTempC != null
+                if (hasObd || loc != null) {
+                    val reading = OBDReading(
+                        tripId = tripId,
+                        timestamp = now,
+                        // Скорость ЭБУ точнее на малых скоростях; GPS — запасной источник.
+                        speedKmh = obd.speedKmh ?: gpsSpeed,
+                        rpm = (obd.rpm ?: 0).toFloat(),
+                        coolantTempC = (obd.coolantTempC ?: 0).toFloat(),
+                        throttlePercent = obd.throttlePercent ?: 0f,
+                        fuelLevelPercent = obd.fuelLevelPercent ?: 0f,
+                        mafGs = obd.mafGs ?: 0f,
+                        instantFuelLPer100 = obd.instantFuelLPer100 ?: 0f,
+                        batteryVoltage = obd.batteryVoltage ?: 0f,
+                        engineLoadPercent = obd.engineLoadPercent ?: 0f,
+                        intakeTempC = (obd.intakeTempC ?: 0).toFloat(),
+                        mapKpa = (obd.mapKpa ?: 0).toFloat(),
+                        ignitionTimingDeg = obd.ignitionTimingDeg ?: 0f,
+                        oilTempC = (obd.oilTempC ?: 0).toFloat(),
+                        shortFuelTrim1Pct = obd.shortFuelTrim1Pct ?: 0f,
+                        longFuelTrim1Pct = obd.longFuelTrim1Pct ?: 0f,
+                        distanceMilKm = (obd.distanceMilKm ?: 0).toFloat(),
+                        distanceSinceClearKm = (obd.distanceSinceClearKm ?: 0).toFloat(),
+                        latitude = loc?.latitude,
+                        longitude = loc?.longitude,
+                    )
+                    tripRepo.appendReading(reading)
+                    runCatching { tracker.onReading(reading) }
+                }
+            }
+            // Без адаптера данные приходят только с GPS (фикс раз в 2 c) — чаще писать незачем.
+            delay(if (obdFresh) WRITE_INTERVAL_MS else GPS_WRITE_INTERVAL_MS)
+        }
+    }
+
+    private fun shouldUseGps(): Boolean =
+        controller.activeTripId.value != null &&
+            (!controller.androidAutoTrip.value || !controller.paused.value)
 
     /** Авто-пауза GPS-сессии на долгой стоянке и снятие паузы, когда машина поехала. */
     private fun updateGpsIdlePause(now: Long, gpsSpeed: Float) {
@@ -363,12 +373,12 @@ class TripForegroundService : Service() {
     }
 
     private fun stop() {
+        sessions.onRecorderReady(false)
         writerJob?.cancel(); writerJob = null
         obdCacheJob?.cancel(); obdCacheJob = null
         gpsRetryJob?.cancel(); gpsRetryJob = null
         notificationJob?.cancel(); notificationJob = null
         stopGps()
-        controller.reset()
         scope.launch { tracker.detach() }
         activeTripId = null
         shownNotification = null
@@ -385,7 +395,9 @@ class TripForegroundService : Service() {
         val st = obdRepo.connectionStatus.value
         val obdFlowing = st.state == ConnectionState.CONNECTED && st.lastSnapshotHadData
         return when {
-            activeTripId == null -> "Подключение к адаптеру. Сессия начнётся сама."
+            controller.androidAutoTrip.value && controller.manualPause.value -> "Пауза"
+            controller.androidAutoTrip.value && controller.paused.value -> "Пауза: ожидание Android Auto или OBD"
+            activeTripId == null -> "Ожидание подключения OBD-адаптера"
             controller.manualPause.value -> "Пауза"
             controller.gpsMode.value ->
                 if (controller.paused.value) "Пауза: стоянка" else "Запись маршрута по GPS"
@@ -472,6 +484,7 @@ class TripForegroundService : Service() {
         lastLocation = null
         prevFix = null
         gpsSpeedKmh = 0f
+        gpsSpeedAt = 0L
         stationarySince = null
         gpsSubscribed = false
     }
@@ -509,6 +522,8 @@ class TripForegroundService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        sessions.onRecorderReady(false)
+        stopGps()
         scope.cancel()
     }
 }
