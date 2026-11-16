@@ -40,8 +40,7 @@ import javax.inject.Singleton
  *    в ту же сессию;
  *  - обычная сессия закрывается вручную или после 8 ч непрерывной автопаузы;
  *  - обрыв связи с OBD-сессией ставит её на паузу, GPS-сессия продолжает запись.
- *  - в режиме Android Auto подключение запускает и возобновляет запись,
- *    отключение ставит её на паузу без ограничения по времени.
+ *  - подключение Android Auto запускает автоподключение к последнему адаптеру.
  */
 @Singleton
 class AutoSessionManager @Inject constructor(
@@ -152,7 +151,7 @@ class AutoSessionManager @Inject constructor(
             }.launchIn(scope)
             // Уже после подписки на статус — чтобы переходы подключения не прошли мимо.
             if (adopted) tripMutex.withLock {
-                if (prefs.autoConnect.first() && !controller.androidAutoTrip.value && !androidAutoFinished) {
+                if (prefs.autoConnect.first()) {
                     connectToLastAdapterLocked()
                 }
             }
@@ -165,8 +164,7 @@ class AutoSessionManager @Inject constructor(
             while (isActive) {
                 delay(2000)
                 tripMutex.withLock {
-                    if (currentTripId == null || waitingForAndroidAuto() ||
-                        ((controller.gpsMode.value || controller.gpsFallback.value) && !controller.androidAutoTrip.value)
+                    if (currentTripId == null || controller.gpsMode.value || controller.gpsFallback.value
                     ) return@withLock
                     val s = obdRepo.connectionStatus.value
                     if (s.state != ConnectionState.CONNECTED) return@withLock
@@ -190,9 +188,7 @@ class AutoSessionManager @Inject constructor(
                 delay(30_000)
                 runCatching {
                     tripMutex.withLock {
-                        if (currentTripId == null || controller.manualPause.value ||
-                            controller.androidAutoTrip.value
-                        ) return@withLock
+                        if (currentTripId == null || controller.manualPause.value) return@withLock
                         val pauseStart = controller.pauseSinceMs.value ?: return@withLock
                         if (System.currentTimeMillis() - pauseStart >= ORPHAN_MAX_AGE_MS) closeTripLocked()
                     }
@@ -244,7 +240,7 @@ class AutoSessionManager @Inject constructor(
             }
             if (androidAutoConnected == true && androidAutoConnect) {
                 connectForAndroidAutoLocked()
-            } else if (!androidAutoFinished && !waitingForAndroidAuto() && prefs.autoConnect.first()) {
+            } else if (!androidAutoFinished && prefs.autoConnect.first()) {
                 connectToLastAdapterLocked()
             }
         }
@@ -256,25 +252,10 @@ class AutoSessionManager @Inject constructor(
 
     private suspend fun onProjectionChangedLocked(connected: Boolean) {
         if (androidAutoConnected == connected) return
-        val wasConnected = androidAutoConnected == true
         androidAutoConnected = connected
         if (connected) {
-            if (!controller.gpsMode.value) markAndroidAutoTripLocked()
-            if (obdRepo.connectionStatus.value.state == ConnectionState.CONNECTED) {
-                onConnectionState(ConnectionState.CONNECTED)
-            }
-            if (controller.androidAutoTrip.value && !controller.manualPause.value) {
-                controller.setPaused(!hasObdData())
-            }
             connectForAndroidAutoLocked()
-            return
-        }
-
-        if (controller.androidAutoTrip.value) controller.setPaused(true)
-        if (wasConnected && (androidAutoConnect || controller.androidAutoTrip.value)) {
-            disconnectAdapterLocked()
-        }
-        if (androidAutoFinished) {
+        } else if (androidAutoFinished) {
             prefs.setAndroidAutoFinished(false)
             androidAutoFinished = false
         }
@@ -284,20 +265,8 @@ class AutoSessionManager @Inject constructor(
         if (androidAutoConnect && recorderReady.value && !androidAutoFinished) connectToLastAdapterLocked()
     }
 
-    private fun waitingForAndroidAuto(): Boolean =
-        controller.androidAutoTrip.value && androidAutoConnected != true
-
     private suspend fun shouldWaitForProjection(): Boolean =
         androidAutoConnect && !prefs.lastDeviceAddress.first().isNullOrBlank()
-
-    private suspend fun markAndroidAutoTripLocked() {
-        val id = currentTripId ?: return
-        if (androidAutoConnected == true && androidAutoConnect && !controller.androidAutoTrip.value) {
-            controller.setAndroidAutoTrip(true)
-            controller.setGpsFallback(false)
-            prefs.setAndroidAutoTripId(id)
-        }
-    }
 
     /** Кнопка «Пауза»: запись останавливается без ограничения по времени. */
     suspend fun pauseByUser() = tripMutex.withLock {
@@ -312,8 +281,7 @@ class AutoSessionManager @Inject constructor(
     suspend fun resumeByUser() = tripMutex.withLock {
         if (currentTripId == null) return@withLock
         controller.setManualPause(false)
-        val needsObd = !controller.gpsMode.value || controller.androidAutoTrip.value
-        controller.setPaused(waitingForAndroidAuto() || (needsObd && !hasObdData()))
+        controller.setPaused(!controller.gpsMode.value && !hasObdData())
     }
 
     /** Ручной старт записи по GPS (кнопка на вкладке «Сессия»). */
@@ -346,7 +314,7 @@ class AutoSessionManager @Inject constructor(
         tripMutex.withLock {
             suppressProjectionReconnectLocked()
             disconnectAdapterLocked()
-            if (!controller.androidAutoTrip.value) closeTripLocked()
+            closeTripLocked()
         }
     }
 
@@ -364,9 +332,6 @@ class AutoSessionManager @Inject constructor(
     }
 
     private suspend fun onConnectionState(state: ConnectionState) {
-        if (state == ConnectionState.CONNECTED) markAndroidAutoTripLocked()
-        if (waitingForAndroidAuto()) return
-
         when {
             // Переход → CONNECTED: открываем новую сессию (если еще нет открытой).
             state == ConnectionState.CONNECTED && currentTripId == null -> {
@@ -375,8 +340,6 @@ class AutoSessionManager @Inject constructor(
                 currentTripId = tripId
                 BootReceiver.setEnabled(context, true)
                 controller.onTripStarted(tripId)
-                markAndroidAutoTripLocked()
-                if (controller.androidAutoTrip.value) controller.setPaused(!hasObdData())
                 // Сервис обычно уже работает с момента подключения и сам подхватит
                 // сессию. Повторный старт из фона Android может запретить — не страшно.
                 val wasStandby = standbySince != null
@@ -394,8 +357,6 @@ class AutoSessionManager @Inject constructor(
             state == ConnectionState.DISCONNECTED && currentTripId == null && standbySince != null ->
                 stopStandbyLocked()
             // При обрыве связи OBD-сессия ждёт переподключения. GPS-сессия пишется дальше.
-            controller.androidAutoTrip.value && state != ConnectionState.CONNECTED ->
-                controller.setPaused(true)
             (state == ConnectionState.DISCONNECTED || state == ConnectionState.ERROR) &&
                 currentTripId != null -> {
                 if (controller.manualPause.value) manualPauseSawDisconnect = true
@@ -410,9 +371,9 @@ class AutoSessionManager @Inject constructor(
             state == ConnectionState.CONNECTED &&
                 currentTripId != null &&
                 lastState != ConnectionState.CONNECTED -> {
-                if (!controller.manualPause.value || (manualPauseSawDisconnect && !controller.androidAutoTrip.value)) {
+                if (!controller.manualPause.value || manualPauseSawDisconnect) {
                     controller.setManualPause(false)
-                    controller.setPaused(controller.androidAutoTrip.value && !hasObdData())
+                    controller.setPaused(false)
                 }
                 controller.setGpsFallback(false)
             }
@@ -438,9 +399,7 @@ class AutoSessionManager @Inject constructor(
         currentTripId = null
         standbySince = null
         BootReceiver.setEnabled(context, false)
-        controller.setAndroidAutoTrip(false)
         if (!shouldWaitForProjection()) stopService()
-        prefs.setAndroidAutoTripId(null)
         tracker.detach()
         prefs.setGpsTripId(null)
         prefs.setManualPauseTripId(null)
@@ -456,11 +415,10 @@ class AutoSessionManager @Inject constructor(
         // Здесь — и для поездок, открытых до появления приёмника.
         BootReceiver.setEnabled(context, orphan != null)
         if (orphan == null) return false
-        controller.setAndroidAutoTrip(prefs.androidAutoTripId.first() == orphan.id)
         val gpsTripId = prefs.gpsTripId.first()
         val manual = prefs.manualPauseTripId.first() == orphan.id
         val now = System.currentTimeMillis()
-        if (!controller.androidAutoTrip.value && !manual &&
+        if (!manual &&
             now - (tripRepo.lastReadingTimestamp(orphan.id) ?: orphan.startTime) > ORPHAN_MAX_AGE_MS
         ) {
             finishTrip(orphan.id)
@@ -487,7 +445,7 @@ class AutoSessionManager @Inject constructor(
         // Процесс мог подняться сам, без экрана (после перезагрузки телефона — см.
         // BootReceiver): из фона Android может не дать стартовать foreground-сервису.
         // Сессию это не отменяет — сервис поднимется при открытии приложения.
-        if (!controller.androidAutoTrip.value) runCatching { startService() }
+        runCatching { startService() }
         return true
     }
 

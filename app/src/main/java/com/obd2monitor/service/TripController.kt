@@ -59,12 +59,6 @@ class TripController @Inject constructor(
      *  AutoSessionManager). */
     val manualPause: StateFlow<Boolean> = _manualPause.asStateFlow()
 
-    private val _androidAutoTrip = MutableStateFlow(false)
-    /** Поездка по OBD, для которой отключение Android Auto ставит запись на паузу. */
-    val androidAutoTrip: StateFlow<Boolean> = _androidAutoTrip.asStateFlow()
-
-    fun setAndroidAutoTrip(value: Boolean) { _androidAutoTrip.value = value }
-
     private val _gpsMode = MutableStateFlow(false)
     /** Сессия начата вручную кнопкой «Запись по GPS». В этом режиме обрыв OBD не
      *  ставит запись на паузу — маршрут, скорость и пробег пишутся по спутникам. */

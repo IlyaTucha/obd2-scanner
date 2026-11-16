@@ -275,14 +275,10 @@ class TripForegroundService : Service() {
                 now - (status.lastSnapshotAt ?: 0L) < OBD_FRESH_MS
             val obd = if (obdFresh) latestObd.value else OBDData()
             val gpsSpeed = if (now - gpsSpeedAt < GPS_SPEED_MAX_AGE_MS) gpsSpeedKmh else 0f
-            if (!controller.androidAutoTrip.value) {
-                if (controller.gpsMode.value && !obdFresh) updateGpsIdlePause(now, gpsSpeed)
-                else updateGpsFallback(now, gpsSpeed, obdFresh)
-            }
+            if (controller.gpsMode.value && !obdFresh) updateGpsIdlePause(now, gpsSpeed)
+            else updateGpsFallback(now, gpsSpeed, obdFresh)
             if (controller.activeTripId.value == tripId && !controller.paused.value) {
-                val loc = lastLocation?.takeIf {
-                    !controller.androidAutoTrip.value || now - gpsSpeedAt < GPS_SPEED_MAX_AGE_MS
-                }
+                val loc = lastLocation
                 // Пишем замер, если есть хоть что-то: свежие данные ЭБУ или координаты.
                 val hasObd = obd.speedKmh != null || obd.rpm != null ||
                     obd.coolantTempC != null || obd.engineLoadPercent != null ||
@@ -322,9 +318,7 @@ class TripForegroundService : Service() {
         }
     }
 
-    private fun shouldUseGps(): Boolean =
-        controller.activeTripId.value != null &&
-            (!controller.androidAutoTrip.value || !controller.paused.value)
+    private fun shouldUseGps(): Boolean = controller.activeTripId.value != null
 
     /** Авто-пауза GPS-сессии на долгой стоянке и снятие паузы, когда машина поехала. */
     private fun updateGpsIdlePause(now: Long, gpsSpeed: Float) {
@@ -395,8 +389,6 @@ class TripForegroundService : Service() {
         val st = obdRepo.connectionStatus.value
         val obdFlowing = st.state == ConnectionState.CONNECTED && st.lastSnapshotHadData
         return when {
-            controller.androidAutoTrip.value && controller.manualPause.value -> "Пауза"
-            controller.androidAutoTrip.value && controller.paused.value -> "Пауза: ожидание Android Auto или OBD"
             activeTripId == null -> "Ожидание подключения OBD-адаптера"
             controller.manualPause.value -> "Пауза"
             controller.gpsMode.value ->
