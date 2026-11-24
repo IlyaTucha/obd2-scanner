@@ -465,12 +465,35 @@ private fun MileageCard(
             )
         }
         val sortedDesc = entries.sortedByDescending { it.date }
-        sortedDesc.take(shown).forEach { entry ->
+        if (sortedDesc.size > 1) {
+            Text(
+                "С прошлой записи",
+                modifier = Modifier.align(Alignment.End).padding(end = 4.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = ColorTextSecondary,
+            )
+        }
+        sortedDesc.take(shown).forEachIndexed { index, entry ->
+            val previous = sortedDesc.getOrNull(index + 1)
             // Каждая строка — кликабельная: тап открывает диалог редактирования
             // именно этой записи. Иконка удаления слева не нужна — удаление
             // доступно из диалога edit'а.
             EditableRow(onClick = { onEdit(entry) }) {
-                Text("${entry.odometerKm} км", style = MaterialTheme.typography.bodyMedium)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("${entry.odometerKm} км", style = MaterialTheme.typography.bodyMedium)
+                    if (previous != null) {
+                        val deltaKm = entry.odometerKm - previous.odometerKm
+                        Text(
+                            "$deltaKm км",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = ColorTextSecondary,
+                        )
+                    }
+                }
                 Text(
                     dateFormat.format(Date(entry.date)) + if (entry.note.isNotBlank()) "  · ${entry.note}" else "",
                     style = MaterialTheme.typography.labelSmall,
